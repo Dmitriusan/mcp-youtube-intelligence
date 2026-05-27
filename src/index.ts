@@ -12,6 +12,7 @@ import { createRequire } from "module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { analyzeChannel } from "./analyze_channel.js";
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require("../package.json") as { version: string };
@@ -40,19 +41,31 @@ server.tool(
   "Extract structured intelligence from a YouTube channel — transcripts, topics, competitive signals",
   {
     channel_url: z.string().describe("YouTube channel URL or @handle"),
-    max_videos: z.number().optional().default(10).describe("Maximum number of recent videos to analyze"),
+    max_videos: z.number().optional().default(5).describe("Maximum number of recent videos to analyze (default 5)"),
   },
   async ({ channel_url, max_videos }) => {
-    // TODO Sprint #3 Day 2+: implement YouTube transcript extraction via Apify actor
-    // TODO Sprint #3 Day 3+: implement LLM-based topic + competitive signal analysis
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `[mcp-youtube-intelligence v${packageVersion}] analyze_channel stub\nchannel_url: ${channel_url}\nmax_videos: ${max_videos}\n\nNot yet implemented — Day 1 scaffold.`,
-        },
-      ],
-    };
+    try {
+      const result = await analyzeChannel(channel_url, max_videos);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error analyzing channel "${channel_url}": ${message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   }
 );
 
