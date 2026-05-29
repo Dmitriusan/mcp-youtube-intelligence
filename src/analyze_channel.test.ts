@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   parseChannelInput,
   extractTopics,
+  extractTopicsWithLLM,
   resolveChannel,
   getRecentVideoIds,
   runApifyTranscriptScraper,
@@ -228,12 +229,119 @@ describe("analyzeChannel (happy path, mocked fetch)", () => {
     expect(result.topics).toContain("javascript");
     expect(result.topics).toContain("typescript");
     expect(result.topics).toContain("programming");
-    expect(result.note).toContain("Day 2");
+    expect(result.note).toContain("Day 3");
 
     // Verify Apify actor ID was used
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining(TRANSCRIPT_ACTOR_ID),
       expect.any(Object),
     );
+
+    // topics_structured is [] because GEMINI_API_KEY is not set in this test
+    expect(result.topics_structured).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractTopicsWithLLM — Gemini 2.5 Flash semantic extraction
+// ---------------------------------------------------------------------------
+describe("extractTopicsWithLLM", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns TopicStructured[] populated from Gemini response", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    theme: "JavaScript frameworks and tooling",
+                    entities: ["React", "TypeScript", "Vite"],
+                    tags: ["javascript", "frontend", "webdev"],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid001" },
+        transcript: [{ text: "react typescript javascript vite frontend development" }],
+      },
+    ];
+
+    const result = await extractTopicsWithLLM(items, "test-key");
+    expect(result).toHaveLength(1);
+    expect(result[0].video_id).toBe("vid001");
+    expect(result[0].theme).toBe("JavaScript frameworks and tooling");
+    expect(result[0].entities).toContain("React");
+    expect(result[0].tags).toContain("javascript");
+  });
+
+  it("skips items with no transcript and makes no fetch call", async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [{ videoDetails: { videoId: "vid001" } }];
+    const result = await extractTopicsWithLLM(items, "test-key");
+    expect(result).toHaveLength(0);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("uses graceful defaults when Gemini response omits optional fields", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: JSON.stringify({ theme: "Machine learning" }) }],
+            },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid002" },
+        transcript: [{ text: "neural networks deep learning training" }],
+      },
+    ];
+
+    const result = await extractTopicsWithLLM(items, "test-key");
+    expect(result).toHaveLength(1);
+    expect(result[0].theme).toBe("Machine learning");
+    expect(result[0].entities).toEqual([]);
+    expect(result[0].tags).toEqual([]);
+  });
+
+  it("throws when Gemini returns a non-ok HTTP status", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      text: async () => "Rate limit exceeded",
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid003" },
+        transcript: [{ text: "some content about coding" }],
+      },
+    ];
+
+    await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 429/);
   });
 });

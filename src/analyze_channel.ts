@@ -1,10 +1,10 @@
 /**
- * analyze_channel — Day 2 implementation.
+ * analyze_channel — Day 3 implementation.
  *
  * Channel resolution: YouTube Data API v3 (forHandle / by channel ID)
  * Transcript fetch: Apify supreme_coder/youtube-transcript-scraper (vKlQCAJRI72MdyK1u)
  *   — same actor used by IrrationalCorp Scout/R&D signal pipeline
- * Topic extraction: word frequency (Day 3 adds LLM semantic layer)
+ * Topic extraction: Gemini 2.5 Flash semantic layer (primary); word-frequency fallback
  */
 
 import { readFileSync } from "fs";
@@ -18,11 +18,13 @@ const APIFY_BASE = "https://api.apify.com/v2";
 // supreme_coder/youtube-transcript-scraper — same actor as scripts/yt-captions/apify_download.py
 export const TRANSCRIPT_ACTOR_ID = "vKlQCAJRI72MdyK1u";
 const YT_API_BASE = "https://www.googleapis.com/youtube/v3";
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 // Corp secrets path — MCP server runs on the same host as IrrationalCorp repo
 const CORP_SECRETS_DIR = "/media/development/irrationals/IrrationalCorp/secrets";
 
 const APIFY_POLL_INTERVAL_MS = 15_000;
 const APIFY_MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes
+const GEMINI_TRANSCRIPT_WORD_LIMIT = 300;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,6 +36,13 @@ export interface ChannelResolution {
   title: string;
 }
 
+export interface TopicStructured {
+  video_id: string;
+  theme: string;
+  entities: string[];
+  tags: string[];
+}
+
 export interface AnalyzeChannelResult {
   channel_id: string;
   channel_title: string;
@@ -42,6 +51,7 @@ export interface AnalyzeChannelResult {
   videos_analyzed: number;
   transcripts_available: number;
   topics: string[];
+  topics_structured: TopicStructured[];
   note: string;
 }
 
@@ -79,6 +89,12 @@ export function getApifyToken(): string {
 export function getYouTubeApiKey(): string {
   const key = process.env["YOUTUBE_API_KEY"] ?? loadEnvKey("google-cloud.env", "GOOGLE_CLOUD_API_KEY");
   if (!key) throw new Error("YOUTUBE_API_KEY not configured. Set env var YOUTUBE_API_KEY or ensure secrets/google-cloud.env exists.");
+  return key;
+}
+
+export function getGeminiApiKey(): string {
+  const key = process.env["GEMINI_API_KEY"] ?? loadEnvKey("gemini.env", "GEMINI_API_KEY");
+  if (!key) throw new Error("GEMINI_API_KEY not configured. Set env var GEMINI_API_KEY or ensure secrets/gemini.env exists.");
   return key;
 }
 
@@ -263,6 +279,102 @@ const STOPWORDS = new Set([
   "let","say","said","gonna","wanna","gotta",
 ]);
 
+// ---------------------------------------------------------------------------
+// LLM semantic extraction — Gemini 2.5 Flash (primary route per SC Night 141)
+// ---------------------------------------------------------------------------
+
+interface GeminiContent {
+  parts: Array<{ text: string }>;
+}
+
+interface GeminiCandidate {
+  content: GeminiContent;
+}
+
+interface GeminiResponse {
+  candidates?: GeminiCandidate[];
+}
+
+export async function extractTopicsWithLLM(
+  transcriptItems: unknown[],
+  geminiApiKey: string,
+): Promise<TopicStructured[]> {
+  const results: TopicStructured[] = [];
+
+  for (const item of transcriptItems) {
+    const record = item as Record<string, unknown>;
+    const videoDetails = record["videoDetails"] as Record<string, string> | undefined;
+    const videoId = videoDetails?.["videoId"] ?? "unknown";
+
+    const snippets = record["transcript"];
+    let rawText = "";
+    if (Array.isArray(snippets)) {
+      rawText = snippets.map((s: unknown) => (s as Record<string, string>)["text"] ?? "").join(" ");
+    } else if (typeof snippets === "string") {
+      rawText = snippets;
+    }
+    if (!rawText.trim()) continue;
+
+    // Truncate to limit Gemini input tokens
+    const words = rawText.split(/\s+/);
+    const truncated = words.slice(0, GEMINI_TRANSCRIPT_WORD_LIMIT).join(" ");
+
+    const prompt = `Analyze this YouTube video transcript excerpt and return a JSON object with fields:
+- "theme": one short phrase describing the main topic (max 8 words)
+- "entities": array of up to 6 specific named technologies, products, companies, or people mentioned
+- "tags": array of up to 8 topical keywords relevant for content classification
+
+Transcript (video_id: ${videoId}):
+${truncated}`;
+
+    const requestBody = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            theme: { type: "STRING" },
+            entities: { type: "ARRAY", items: { type: "STRING" } },
+            tags: { type: "ARRAY", items: { type: "STRING" } },
+          },
+          required: ["theme", "entities", "tags"],
+        },
+      },
+    };
+
+    const resp = await fetch(
+      `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      },
+    );
+
+    if (!resp.ok) {
+      throw new Error(`Gemini API error ${resp.status}: ${await resp.text()}`);
+    }
+
+    const body = await resp.json() as GeminiResponse;
+    const text = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+    const parsed = JSON.parse(text) as { theme?: string; entities?: string[]; tags?: string[] };
+
+    results.push({
+      video_id: videoId,
+      theme: parsed.theme ?? "",
+      entities: parsed.entities ?? [],
+      tags: parsed.tags ?? [],
+    });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Topic extraction — word frequency (kept as fallback when LLM unavailable)
+// ---------------------------------------------------------------------------
+
 export function extractTopics(transcriptItems: unknown[], topN = 20): string[] {
   const freq: Record<string, number> = {};
 
@@ -315,8 +427,17 @@ export async function analyzeChannel(
   const videoUrls = videoIds.map((id) => `https://www.youtube.com/watch?v=${id}`);
   const transcriptItems = await runApifyTranscriptScraper(videoUrls, apifyToken);
 
-  // Step 4: Extract topics (word frequency; Day 3 adds LLM semantic layer)
+  // Step 4a: Word-frequency topics (always computed — fallback if LLM fails)
   const topics = extractTopics(transcriptItems);
+
+  // Step 4b: LLM semantic extraction via Gemini 2.5 Flash (primary route per SC Night 141)
+  let topics_structured: TopicStructured[] = [];
+  try {
+    const geminiKey = getGeminiApiKey();
+    topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey);
+  } catch {
+    // Graceful degradation — topics_structured stays empty; topics is the fallback
+  }
 
   return {
     channel_id: channel.channelId,
@@ -326,6 +447,7 @@ export async function analyzeChannel(
     videos_analyzed: videoIds.length,
     transcripts_available: transcriptItems.length,
     topics,
-    note: "Day 2: word-frequency topic extraction. Day 3 adds LLM-based semantic analysis.",
+    topics_structured,
+    note: "Day 3: Gemini 2.5 Flash semantic extraction (topics_structured) + word-frequency fallback (topics).",
   };
 }
