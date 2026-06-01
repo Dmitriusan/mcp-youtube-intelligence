@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdirSync, writeFileSync } from "fs";
 import {
   parseChannelInput,
   extractTopics,
@@ -7,8 +8,17 @@ import {
   getRecentVideoIds,
   runApifyTranscriptScraper,
   analyzeChannel,
+  persistAnalysisResult,
   TRANSCRIPT_ACTOR_ID,
+  type AnalyzeChannelResult,
 } from "./analyze_channel.js";
+
+// Mock fs so that mkdirSync/writeFileSync are no-ops in all tests (persistence side-effect),
+// while readFileSync (used by loadEnvKey) stays real so secret loading works normally.
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  return { ...actual, mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+});
 
 // ---------------------------------------------------------------------------
 // parseChannelInput — pure function, no mocks needed
@@ -229,7 +239,7 @@ describe("analyzeChannel (happy path, mocked fetch)", () => {
     expect(result.topics).toContain("javascript");
     expect(result.topics).toContain("typescript");
     expect(result.topics).toContain("programming");
-    expect(result.note).toContain("Day 3");
+    expect(result.note).toContain("Day 4");
 
     // Verify Apify actor ID was used
     expect(mockFetch).toHaveBeenCalledWith(
@@ -343,5 +353,65 @@ describe("extractTopicsWithLLM", () => {
     ];
 
     await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 429/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// persistAnalysisResult — disk persistence of topics_structured artifact
+// ---------------------------------------------------------------------------
+describe("persistAnalysisResult", () => {
+  const sampleResult: AnalyzeChannelResult = {
+    channel_id: "UCtest1234567890ABCDEFG",
+    channel_title: "Test Channel",
+    channel_url: "@testchannel",
+    sample_video_ids: ["vid1", "vid2"],
+    videos_analyzed: 2,
+    transcripts_available: 2,
+    topics: ["javascript", "typescript"],
+    topics_structured: [{ video_id: "vid1", theme: "JavaScript basics", entities: ["Node"], tags: ["js"] }],
+    note: "Day 4 test",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    delete process.env["ANALYZE_CHANNEL_OUTPUT_DIR"];
+  });
+
+  it("writes JSON artifact to output dir with correct schema", () => {
+    persistAnalysisResult(sampleResult, "/tmp/test-output");
+
+    expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith("/tmp/test-output", { recursive: true });
+    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce();
+
+    const [filepath, content] = vi.mocked(writeFileSync).mock.calls[0] as [string, string, string];
+    expect(filepath).toMatch(/analyze_channel-UCtest1234567890ABCDEFG-.*\.json$/);
+
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    expect(parsed["channel_id"]).toBe("UCtest1234567890ABCDEFG");
+    expect(parsed["channel_title"]).toBe("Test Channel");
+    expect(parsed["video_count"]).toBe(2);
+    expect(Array.isArray(parsed["topics_structured"])).toBe(true);
+    expect((parsed["topics_structured"] as unknown[]).length).toBe(1);
+    expect(parsed["topics"]).toContain("javascript");
+    expect(typeof parsed["generated_at"]).toBe("string");
+  });
+
+  it("continues without error when directory creation fails (unwritable path)", () => {
+    vi.mocked(mkdirSync).mockImplementationOnce(() => {
+      throw new Error("EACCES: permission denied");
+    });
+
+    expect(() => persistAnalysisResult(sampleResult, "/unwritable/dir")).not.toThrow();
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
+  });
+
+  it("uses ANALYZE_CHANNEL_OUTPUT_DIR env var as default output dir", () => {
+    process.env["ANALYZE_CHANNEL_OUTPUT_DIR"] = "/env/custom/output";
+    persistAnalysisResult(sampleResult); // no explicit outputDir — reads env var
+
+    expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith("/env/custom/output", { recursive: true });
   });
 });

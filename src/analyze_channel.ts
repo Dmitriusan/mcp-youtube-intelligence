@@ -1,13 +1,14 @@
 /**
- * analyze_channel — Day 3 implementation.
+ * analyze_channel — Day 4 implementation.
  *
  * Channel resolution: YouTube Data API v3 (forHandle / by channel ID)
  * Transcript fetch: Apify supreme_coder/youtube-transcript-scraper (vKlQCAJRI72MdyK1u)
  *   — same actor used by IrrationalCorp Scout/R&D signal pipeline
  * Topic extraction: Gemini 2.5 Flash semantic layer (primary); word-frequency fallback
+ * Persistence: topics_structured + topics written to disk as JSON artifact (ANALYZE_CHANNEL_OUTPUT_DIR)
  */
 
-import { readFileSync } from "fs";
+import { readFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 
 // ---------------------------------------------------------------------------
@@ -25,6 +26,7 @@ const CORP_SECRETS_DIR = "/media/development/irrationals/IrrationalCorp/secrets"
 const APIFY_POLL_INTERVAL_MS = 15_000;
 const APIFY_MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes
 const GEMINI_TRANSCRIPT_WORD_LIMIT = 300;
+const DEFAULT_OUTPUT_DIR = "./output/";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -259,6 +261,32 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Disk persistence — write topics_structured artifact as JSON (Day 4)
+// ---------------------------------------------------------------------------
+
+export function persistAnalysisResult(
+  result: AnalyzeChannelResult,
+  outputDir: string = process.env["ANALYZE_CHANNEL_OUTPUT_DIR"] ?? DEFAULT_OUTPUT_DIR,
+): void {
+  try {
+    mkdirSync(outputDir, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const filename = `analyze_channel-${result.channel_id}-${timestamp}.json`;
+    const payload = {
+      channel_id: result.channel_id,
+      channel_title: result.channel_title,
+      video_count: result.videos_analyzed,
+      topics_structured: result.topics_structured,
+      topics: result.topics,
+      generated_at: new Date().toISOString(),
+    };
+    writeFileSync(join(outputDir, filename), JSON.stringify(payload, null, 2), "utf8");
+  } catch (err) {
+    console.warn(`[analyze_channel] Failed to persist output: ${(err as Error).message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Topic extraction — word frequency (Day 3 replaces with LLM semantic layer)
 // ---------------------------------------------------------------------------
 
@@ -439,7 +467,7 @@ export async function analyzeChannel(
     // Graceful degradation — topics_structured stays empty; topics is the fallback
   }
 
-  return {
+  const result: AnalyzeChannelResult = {
     channel_id: channel.channelId,
     channel_title: channel.title,
     channel_url: channelInput,
@@ -448,6 +476,11 @@ export async function analyzeChannel(
     transcripts_available: transcriptItems.length,
     topics,
     topics_structured,
-    note: "Day 3: Gemini 2.5 Flash semantic extraction (topics_structured) + word-frequency fallback (topics).",
+    note: "Day 4: Gemini 2.5 Flash semantic extraction (topics_structured) + word-frequency fallback (topics) + disk persistence.",
   };
+
+  // Side-effect: persist artifact to disk (configurable via ANALYZE_CHANNEL_OUTPUT_DIR)
+  persistAnalysisResult(result);
+
+  return result;
 }
