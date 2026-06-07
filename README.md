@@ -10,6 +10,16 @@ Analyzes YouTube channels to produce structured intelligence reports:
 - Competitive signal detection (product mentions, competitor references)
 - Content positioning analysis
 
+## Prerequisites
+
+You need API keys for three services:
+
+| Variable | Where to get it |
+|----------|----------------|
+| `YOUTUBE_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → YouTube Data API v3 |
+| `APIFY_TOKEN` | [Apify Console](https://console.apify.com/) → Account → Integrations → API token |
+| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) → Get API key |
+
 ## Installation
 
 ```bash
@@ -18,13 +28,18 @@ npm install -g mcp-youtube-intelligence
 
 ## Usage
 
-Add to your Claude Desktop / MCP client config:
+Add to your Claude Desktop / MCP client config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
 ```json
 {
   "mcpServers": {
     "youtube-intelligence": {
-      "command": "mcp-youtube-intelligence"
+      "command": "mcp-youtube-intelligence",
+      "env": {
+        "YOUTUBE_API_KEY": "your-youtube-api-key",
+        "APIFY_TOKEN": "your-apify-token",
+        "GEMINI_API_KEY": "your-gemini-api-key"
+      }
     }
   }
 }
@@ -35,9 +50,11 @@ Add to your Claude Desktop / MCP client config:
 **`analyze_channel`** — Extract intelligence from a YouTube channel
 
 ```
-channel_url: YouTube channel URL or @handle
-max_videos:  Number of recent videos to analyze (default: 10)
+channel_url: YouTube channel URL or @handle (e.g. @fireship, youtube.com/@fireship)
+max_videos:  Number of recent videos to analyze (default: 5)
 ```
+
+**Example prompt:** "Analyze the @fireship YouTube channel and tell me what topics they cover most."
 
 ## Development
 
