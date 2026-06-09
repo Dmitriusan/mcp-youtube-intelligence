@@ -27,6 +27,7 @@ const APIFY_POLL_INTERVAL_MS = 15_000;
 const APIFY_MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes
 const GEMINI_TRANSCRIPT_WORD_LIMIT = 300;
 const DEFAULT_OUTPUT_DIR = "./output/";
+const MAX_VIDEOS = 50;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -441,6 +442,9 @@ export async function analyzeChannel(
   channelInput: string,
   maxVideos: number,
 ): Promise<AnalyzeChannelResult> {
+  if (maxVideos < 1) throw new Error(`max_videos must be at least 1, got ${maxVideos}`);
+  const clampedMaxVideos = Math.min(maxVideos, MAX_VIDEOS);
+
   const apifyToken = getApifyToken();
   const youtubeApiKey = getYouTubeApiKey();
 
@@ -448,7 +452,7 @@ export async function analyzeChannel(
   const channel = await resolveChannel(channelInput, youtubeApiKey);
 
   // Step 2: Get recent video IDs from uploads playlist
-  const videoIds = await getRecentVideoIds(channel.uploadsPlaylistId, maxVideos, youtubeApiKey);
+  const videoIds = await getRecentVideoIds(channel.uploadsPlaylistId, clampedMaxVideos, youtubeApiKey);
   if (!videoIds.length) throw new Error(`No videos found for channel: ${channelInput}`);
 
   // Step 3: Fetch transcripts via Apify actor (same actor as Scout/R&D pipeline)
@@ -458,14 +462,21 @@ export async function analyzeChannel(
   // Step 4a: Word-frequency topics (always computed — fallback if LLM fails)
   const topics = extractTopics(transcriptItems);
 
-  // Step 4b: LLM semantic extraction via Gemini 2.5 Flash (primary route per SC Night 141)
+  // Step 4b: LLM semantic extraction via Gemini 2.5 Flash (primary route)
   let topics_structured: TopicStructured[] = [];
+  let geminiUsed = false;
   try {
     const geminiKey = getGeminiApiKey();
     topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey);
-  } catch {
+    geminiUsed = true;
+  } catch (err) {
     // Graceful degradation — topics_structured stays empty; topics is the fallback
+    console.warn(`[analyze_channel] Gemini extraction unavailable, using keyword fallback: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  const note = geminiUsed
+    ? `Analyzed ${videoIds.length} video(s) — semantic topics (topics_structured) via Gemini, keyword topics (topics) as supplemental.`
+    : `Analyzed ${videoIds.length} video(s) — keyword topics only (Gemini unavailable or not configured). Set GEMINI_API_KEY for richer structured analysis.`;
 
   const result: AnalyzeChannelResult = {
     channel_id: channel.channelId,
@@ -476,7 +487,7 @@ export async function analyzeChannel(
     transcripts_available: transcriptItems.length,
     topics,
     topics_structured,
-    note: "Day 4: Gemini 2.5 Flash semantic extraction (topics_structured) + word-frequency fallback (topics) + disk persistence.",
+    note,
   };
 
   // Side-effect: persist artifact to disk (configurable via ANALYZE_CHANNEL_OUTPUT_DIR)

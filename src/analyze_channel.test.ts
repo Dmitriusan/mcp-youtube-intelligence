@@ -239,7 +239,7 @@ describe("analyzeChannel (happy path, mocked fetch)", () => {
     expect(result.topics).toContain("javascript");
     expect(result.topics).toContain("typescript");
     expect(result.topics).toContain("programming");
-    expect(result.note).toContain("Day 4");
+    expect(result.note).toContain("3 video(s)");
 
     // Verify Apify actor ID was used
     expect(mockFetch).toHaveBeenCalledWith(
@@ -249,6 +249,98 @@ describe("analyzeChannel (happy path, mocked fetch)", () => {
 
     // topics_structured is [] because GEMINI_API_KEY is not set in this test
     expect(result.topics_structured).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — max_videos validation
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (input validation)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    vi.restoreAllMocks();
+  });
+
+  it("throws immediately when max_videos is 0", async () => {
+    await expect(analyzeChannel("@fireship", 0)).rejects.toThrow(/max_videos must be at least 1/);
+  });
+
+  it("throws immediately when max_videos is negative", async () => {
+    await expect(analyzeChannel("@fireship", -5)).rejects.toThrow(/max_videos must be at least 1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — Apify terminal failure
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (Apify terminal failure, mocked fetch)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("rejects with FAILED status when Apify run terminates unsuccessfully", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Call 1: YouTube channels API
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCVHVAPyVgjkAyfLiwbHyXyg",
+            snippet: { title: "Fireship" },
+            contentDetails: { relatedPlaylists: { uploads: "UUVHVAPyVgjkAyfLiwbHyXyg" } },
+          },
+        ],
+      }),
+    });
+
+    // Call 2: YouTube playlistItems API
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [{ contentDetails: { videoId: "vid001" } }],
+      }),
+    });
+
+    // Call 3: Apify start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-fail", defaultDatasetId: "ds-fail", status: "RUNNING" },
+      }),
+    });
+
+    // Call 4: Apify poll → FAILED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-fail", defaultDatasetId: "ds-fail", status: "FAILED" },
+      }),
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = analyzeChannel("@fireship", 3);
+    // Attach rejection handler before running timers to avoid unhandled-rejection race
+    const failExpectation = expect(resultPromise).rejects.toThrow(/FAILED/);
+    await vi.runAllTimersAsync();
+    await failExpectation;
   });
 });
 

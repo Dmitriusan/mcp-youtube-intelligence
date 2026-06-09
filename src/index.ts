@@ -38,10 +38,10 @@ const server = new McpServer({
 
 server.tool(
   "analyze_channel",
-  "Extract structured intelligence from a YouTube channel — transcripts, topics, competitive signals",
+  "Extract structured intelligence from a YouTube channel. Returns: channel metadata, sampled video IDs, word-frequency topics, and per-video structured topics (theme, named entities, tags) from Gemini semantic analysis. Accepts a channel @handle, youtube.com/@handle URL, or UC... channel ID.",
   {
-    channel_url: z.string().describe("YouTube channel URL or @handle"),
-    max_videos: z.number().optional().default(5).describe("Maximum number of recent videos to analyze (default 5)"),
+    channel_url: z.string().describe("YouTube channel URL or @handle (e.g. @fireship, https://www.youtube.com/@fireship, UCxxxxxxx)"),
+    max_videos: z.number().optional().default(5).describe("Number of recent videos to analyze (default 5, max 50)"),
   },
   async ({ channel_url, max_videos }) => {
     try {
