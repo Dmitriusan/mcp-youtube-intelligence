@@ -387,7 +387,13 @@ ${truncated}`;
 
     const body = await resp.json() as GeminiResponse;
     const text = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-    const parsed = JSON.parse(text) as { theme?: string; entities?: string[]; tags?: string[] };
+    let parsed: { theme?: string; entities?: string[]; tags?: string[] } = {};
+    try {
+      parsed = JSON.parse(text) as typeof parsed;
+    } catch {
+      console.warn(`[analyze_channel] Gemini returned unparseable JSON for video ${videoId}, skipping`);
+      continue;
+    }
 
     results.push({
       video_id: videoId,
