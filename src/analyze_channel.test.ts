@@ -446,6 +446,87 @@ describe("extractTopicsWithLLM", () => {
 
     await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 429/);
   });
+
+  it("skips video with malformed JSON response and continues processing remaining videos", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: "not-valid-json{{" }] } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: JSON.stringify({ theme: "Testing strategies", entities: [], tags: ["testing"] }) }] } }],
+        }),
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "some content about coding" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [{ text: "more content about testing" }] },
+    ];
+
+    const result = await extractTopicsWithLLM(items, "test-key");
+    // vid001 skipped due to parse failure; vid002 succeeds
+    expect(result).toHaveLength(1);
+    expect(result[0].video_id).toBe("vid002");
+    expect(result[0].theme).toBe("Testing strategies");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getRecentVideoIds — YouTube playlistItems API
+// ---------------------------------------------------------------------------
+describe("getRecentVideoIds", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns video IDs extracted from playlistItems response", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          { contentDetails: { videoId: "vid001" } },
+          { contentDetails: { videoId: "vid002" } },
+          { contentDetails: { videoId: "vid003" } },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await getRecentVideoIds("PLtest1234", 3, "test-key");
+    expect(result).toEqual(["vid001", "vid002", "vid003"]);
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("PLtest1234"));
+  });
+
+  it("throws when the playlistItems API returns a non-ok status", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 403 });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(getRecentVideoIds("PLtest1234", 3, "test-key")).rejects.toThrow(
+      /playlistItems API error 403/,
+    );
+  });
+
+  it("filters out playlist items with empty videoId", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          { contentDetails: { videoId: "vid001" } },
+          { contentDetails: { videoId: "" } },
+          { contentDetails: { videoId: "vid003" } },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await getRecentVideoIds("PLtest1234", 3, "test-key");
+    expect(result).toEqual(["vid001", "vid003"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
