@@ -1,0 +1,23 @@
+name: mcp-youtube-intelligence
+displayName: YouTube Intelligence MCP
+description: Extract structured intelligence from YouTube channels and videos — transcripts, topic frequency, competitive signals, and content positioning analysis.
+license: MIT
+homepage: https://github.com/Dmitriusan/mcp-youtube-intelligence
+npm: "mcp-youtube-intelligence"
+categories:
+  - developer-tools
+  - productivity
+keywords:
+  - youtube
+  - mcp
+  - intelligence
+  - transcripts
+  - channel-analysis
+  - competitive-research
+  - content-strategy
+  - model-context-protocol
+tools:
+  - name: analyze_channel
+    description: Extract structured intelligence from a YouTube channel — transcripts from recent videos, topic frequency analysis, competitive signal detection (product/competitor mentions), and content positioning summary
+transport:
+  - stdio
