@@ -20,6 +20,14 @@ You need API keys for three services:
 | `APIFY_TOKEN` | [Apify Console](https://console.apify.com/) → Account → Integrations → API token |
 | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) → Get API key |
 
+`GEMINI_API_KEY` is optional — if omitted, the tool falls back to word-frequency topic extraction instead of semantic analysis.
+
+**Optional**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANALYZE_CHANNEL_OUTPUT_DIR` | `./output/` | Directory where per-channel JSON analysis artifacts are written |
+
 ## Installation
 
 ```bash

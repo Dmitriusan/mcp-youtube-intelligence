@@ -541,6 +541,50 @@ describe("getRecentVideoIds", () => {
 });
 
 // ---------------------------------------------------------------------------
+// runApifyTranscriptScraper — Apify actor polling and terminal status handling
+// ---------------------------------------------------------------------------
+describe("runApifyTranscriptScraper (terminal statuses)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it.each(["ABORTED", "TIMED-OUT"] as const)(
+    "throws when Apify run ends with %s status",
+    async (terminalStatus) => {
+      vi.useFakeTimers();
+      const mockFetch = vi.fn();
+
+      // Start run → RUNNING
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: { id: "run-term", defaultDatasetId: "ds-term", status: "RUNNING" },
+        }),
+      });
+
+      // Poll → terminal status
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: { id: "run-term", defaultDatasetId: "ds-term", status: terminalStatus },
+        }),
+      });
+
+      vi.stubGlobal("fetch", mockFetch);
+
+      const resultPromise = runApifyTranscriptScraper(
+        ["https://www.youtube.com/watch?v=test123"],
+        "test-token",
+      );
+      const failExpectation = expect(resultPromise).rejects.toThrow(terminalStatus);
+      await vi.runAllTimersAsync();
+      await failExpectation;
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // resolveChannel — YouTube Data API channel resolution
 // ---------------------------------------------------------------------------
 describe("resolveChannel", () => {
