@@ -541,6 +541,93 @@ describe("getRecentVideoIds", () => {
 });
 
 // ---------------------------------------------------------------------------
+// resolveChannel — YouTube Data API channel resolution
+// ---------------------------------------------------------------------------
+describe("resolveChannel", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("resolves @handle via forHandle API call and returns channel metadata", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCtest1234567890ABCDE12",
+            snippet: { title: "Test Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUtest1234567890ABCDE12" } },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await resolveChannel("@testchannel", "test-api-key");
+    expect(result.channelId).toBe("UCtest1234567890ABCDE12");
+    expect(result.title).toBe("Test Channel");
+    expect(result.uploadsPlaylistId).toBe("UUtest1234567890ABCDE12");
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("forHandle="));
+  });
+
+  it("resolves bare UC... channel ID via id parameter", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCVHVAPyVgjkAyfLiwbHyXyg",
+            snippet: { title: "Fireship" },
+            contentDetails: { relatedPlaylists: { uploads: "UUVHVAPyVgjkAyfLiwbHyXyg" } },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await resolveChannel("UCVHVAPyVgjkAyfLiwbHyXyg", "test-api-key");
+    expect(result.channelId).toBe("UCVHVAPyVgjkAyfLiwbHyXyg");
+    expect(result.uploadsPlaylistId).toBe("UUVHVAPyVgjkAyfLiwbHyXyg");
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("id=UCVHVAPyVgjkAyfLiwbHyXyg"));
+  });
+
+  it("throws 'Channel not found' when API returns empty items array", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [] }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@unknown", "test-api-key")).rejects.toThrow(/Channel not found/);
+  });
+
+  it("throws on non-ok HTTP response from channels API", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: async () => "Forbidden",
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      /YouTube channels API error 403/,
+    );
+  });
+
+  it("throws when API body contains error object", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ error: { message: "API key is invalid" } }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@testchannel", "bad-api-key")).rejects.toThrow(
+      /API key is invalid/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // persistAnalysisResult — disk persistence of topics_structured artifact
 // ---------------------------------------------------------------------------
 describe("persistAnalysisResult", () => {
