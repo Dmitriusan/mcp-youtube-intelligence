@@ -69,6 +69,17 @@ describe("parseChannelInput", () => {
     });
   });
 
+  it("parses @handle with period (e.g. @web.dev)", () => {
+    expect(parseChannelInput("@web.dev")).toEqual({ type: "handle", value: "@web.dev" });
+  });
+
+  it("parses youtube.com/@handle URL with period in handle", () => {
+    expect(parseChannelInput("https://www.youtube.com/@google.cloud")).toEqual({
+      type: "handle",
+      value: "@google.cloud",
+    });
+  });
+
   it("throws on unrecognized input", () => {
     expect(() => parseChannelInput("notavalidinput")).toThrow(
       /Cannot parse YouTube channel/,

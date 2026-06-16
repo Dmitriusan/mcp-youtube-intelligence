@@ -108,11 +108,11 @@ export function getGeminiApiKey(): string {
 export function parseChannelInput(input: string): ParsedChannel {
   const trimmed = input.trim();
 
-  // Bare @handle — e.g. @fireship
-  if (/^@[\w-]+$/.test(trimmed)) return { type: "handle", value: trimmed };
+  // Bare @handle — e.g. @fireship or @web.dev (periods allowed in handles)
+  if (/^@[\w.-]+$/.test(trimmed)) return { type: "handle", value: trimmed };
 
-  // Full URL with @handle — youtube.com/@fireship or youtube.com/@fireship/videos
-  const handleFromUrl = trimmed.match(/youtube\.com\/@([\w-]+)/);
+  // Full URL with @handle — youtube.com/@fireship or youtube.com/@web.dev/videos
+  const handleFromUrl = trimmed.match(/youtube\.com\/@([\w.-]+)/);
   if (handleFromUrl) return { type: "handle", value: `@${handleFromUrl[1]}` };
 
   // /channel/UC... URL
