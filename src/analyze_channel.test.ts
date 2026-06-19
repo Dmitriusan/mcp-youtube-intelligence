@@ -695,14 +695,15 @@ describe("persistAnalysisResult", () => {
     delete process.env["ANALYZE_CHANNEL_OUTPUT_DIR"];
   });
 
-  it("writes JSON artifact to output dir with correct schema", () => {
-    persistAnalysisResult(sampleResult, "/tmp/test-output");
+  it("writes JSON artifact to output dir with correct schema and returns the file path", () => {
+    const returnedPath = persistAnalysisResult(sampleResult, "/tmp/test-output");
 
     expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith("/tmp/test-output", { recursive: true });
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce();
 
     const [filepath, content] = vi.mocked(writeFileSync).mock.calls[0] as [string, string, string];
     expect(filepath).toMatch(/analyze_channel-UCtest1234567890ABCDEFG-.*\.json$/);
+    expect(returnedPath).toBe(filepath);
 
     const parsed = JSON.parse(content) as Record<string, unknown>;
     expect(parsed["channel_id"]).toBe("UCtest1234567890ABCDEFG");
@@ -714,19 +715,21 @@ describe("persistAnalysisResult", () => {
     expect(typeof parsed["generated_at"]).toBe("string");
   });
 
-  it("continues without error when directory creation fails (unwritable path)", () => {
+  it("returns null and continues without error when directory creation fails (unwritable path)", () => {
     vi.mocked(mkdirSync).mockImplementationOnce(() => {
       throw new Error("EACCES: permission denied");
     });
 
-    expect(() => persistAnalysisResult(sampleResult, "/unwritable/dir")).not.toThrow();
+    const returnedPath = persistAnalysisResult(sampleResult, "/unwritable/dir");
+    expect(returnedPath).toBeNull();
     expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
   });
 
   it("uses ANALYZE_CHANNEL_OUTPUT_DIR env var as default output dir", () => {
     process.env["ANALYZE_CHANNEL_OUTPUT_DIR"] = "/env/custom/output";
-    persistAnalysisResult(sampleResult); // no explicit outputDir — reads env var
+    const returnedPath = persistAnalysisResult(sampleResult); // no explicit outputDir — reads env var
 
     expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith("/env/custom/output", { recursive: true });
+    expect(returnedPath).toMatch(/^\/env\/custom\/output\//);
   });
 });

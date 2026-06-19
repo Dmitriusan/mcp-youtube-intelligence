@@ -56,6 +56,7 @@ export interface AnalyzeChannelResult {
   topics: string[];
   topics_structured: TopicStructured[];
   note: string;
+  output_path?: string;
 }
 
 export interface ParsedChannel {
@@ -268,11 +269,12 @@ function sleep(ms: number): Promise<void> {
 export function persistAnalysisResult(
   result: AnalyzeChannelResult,
   outputDir: string = process.env["ANALYZE_CHANNEL_OUTPUT_DIR"] ?? DEFAULT_OUTPUT_DIR,
-): void {
+): string | null {
   try {
     mkdirSync(outputDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const filename = `analyze_channel-${result.channel_id}-${timestamp}.json`;
+    const filepath = join(outputDir, filename);
     const payload = {
       channel_id: result.channel_id,
       channel_title: result.channel_title,
@@ -281,9 +283,11 @@ export function persistAnalysisResult(
       topics: result.topics,
       generated_at: new Date().toISOString(),
     };
-    writeFileSync(join(outputDir, filename), JSON.stringify(payload, null, 2), "utf8");
+    writeFileSync(filepath, JSON.stringify(payload, null, 2), "utf8");
+    return filepath;
   } catch (err) {
     console.warn(`[analyze_channel] Failed to persist output: ${(err as Error).message}`);
+    return null;
   }
 }
 
@@ -497,7 +501,8 @@ export async function analyzeChannel(
   };
 
   // Side-effect: persist artifact to disk (configurable via ANALYZE_CHANNEL_OUTPUT_DIR)
-  persistAnalysisResult(result);
+  const outputPath = persistAnalysisResult(result);
+  if (outputPath) result.output_path = outputPath;
 
   return result;
 }
