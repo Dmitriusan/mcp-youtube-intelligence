@@ -549,6 +549,37 @@ describe("runApifyTranscriptScraper (terminal statuses)", () => {
     vi.useRealTimers();
   });
 
+  it("throws timeout error when deadline expires before run succeeds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-timeout", defaultDatasetId: "ds-timeout", status: "RUNNING" },
+      }),
+    });
+
+    // All subsequent polls also return RUNNING — run never finishes
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-timeout", defaultDatasetId: "ds-timeout", status: "RUNNING" },
+      }),
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    const failExpectation = expect(resultPromise).rejects.toThrow(/did not finish within/);
+    await vi.runAllTimersAsync();
+    await failExpectation;
+  });
+
   it.each(["ABORTED", "TIMED-OUT"] as const)(
     "throws when Apify run ends with %s status",
     async (terminalStatus) => {
@@ -668,6 +699,53 @@ describe("resolveChannel", () => {
     await expect(resolveChannel("@testchannel", "bad-api-key")).rejects.toThrow(
       /API key is invalid/,
     );
+  });
+
+  it("resolves legacy /c/ URL via search API then re-resolves by channel ID", async () => {
+    const mockFetch = vi.fn();
+
+    // Call 1: YouTube search API (custom URL path — costs 100 quota units)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [{ id: { channelId: "UCVHVAPyVgjkAyfLiwbHyXyg" } }],
+      }),
+    });
+
+    // Call 2: YouTube channels API (recursive re-resolve by channel ID)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCVHVAPyVgjkAyfLiwbHyXyg",
+            snippet: { title: "Fireship" },
+            contentDetails: { relatedPlaylists: { uploads: "UUVHVAPyVgjkAyfLiwbHyXyg" } },
+          },
+        ],
+      }),
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await resolveChannel("https://www.youtube.com/c/fireship", "test-api-key");
+    expect(result.channelId).toBe("UCVHVAPyVgjkAyfLiwbHyXyg");
+    expect(result.title).toBe("Fireship");
+    expect(result.uploadsPlaylistId).toBe("UUVHVAPyVgjkAyfLiwbHyXyg");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringContaining("search?"));
+  });
+
+  it("throws 'Channel not found' when search returns no results for legacy /user/ URL", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [] }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      resolveChannel("https://www.youtube.com/user/unknownuser", "test-api-key"),
+    ).rejects.toThrow(/Channel not found for custom URL/);
   });
 });
 
