@@ -150,6 +150,36 @@ describe("extractTopics", () => {
     expect(topics).toContain("fast");
     expect(topics).not.toContain("run");
   });
+
+  it("captures short tech terms below 4-char minimum via TECH_TERMS allowlist", () => {
+    const items = [{ transcript: [{ text: "building an api with the gpu accelerated llm using npm and css animations" }] }];
+    const topics = extractTopics(items, 20);
+    expect(topics).toContain("api");
+    expect(topics).toContain("gpu");
+    expect(topics).toContain("llm");
+    expect(topics).toContain("npm");
+    expect(topics).toContain("css");
+  });
+
+  it("does not capture arbitrary 2-3 char words that are not in the TECH_TERMS allowlist", () => {
+    const items = [{ transcript: [{ text: "it ok mr vs ip run" }] }];
+    const topics = extractTopics(items, 20);
+    // "ok", "mr", "vs", "ip", "run" are short non-allowlisted words — must not appear
+    expect(topics).not.toContain("ok");
+    expect(topics).not.toContain("mr");
+    expect(topics).not.toContain("vs");
+    expect(topics).not.toContain("ip");
+    expect(topics).not.toContain("run");
+  });
+
+  it("returns all unique words when topN exceeds the number of unique words found", () => {
+    const items = [{ transcript: [{ text: "javascript typescript" }] }];
+    // Only 2 unique qualifying words; requesting 100 should return exactly those 2
+    const topics = extractTopics(items, 100);
+    expect(topics).toHaveLength(2);
+    expect(topics).toContain("javascript");
+    expect(topics).toContain("typescript");
+  });
 });
 
 // ---------------------------------------------------------------------------

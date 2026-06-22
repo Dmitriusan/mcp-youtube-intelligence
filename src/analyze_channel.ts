@@ -312,6 +312,16 @@ const STOPWORDS = new Set([
   "let","say","said","gonna","wanna","gotta",
 ]);
 
+// Short technical abbreviations exempt from the 4-char minimum in extractTopics.
+// The base regex only matches [a-z]{4,} to suppress noise, but these 2-3 char
+// terms are high-signal in tech content (channels discussing AI, web dev, cloud, etc.).
+const TECH_TERMS = new Set([
+  "ai","ml","vr","ar","xr",
+  "api","sdk","npm","css","gpu","llm","cli","sql","git","aws","gcp","ios",
+  "ui","ux","ci","cd","ide","orm","jwt","ssh","tcp","dns","cdn",
+  "js","ts","tsx","jsx","php","os",
+]);
+
 // ---------------------------------------------------------------------------
 // LLM semantic extraction — Gemini 2.5 Flash (primary route per SC Night 141)
 // ---------------------------------------------------------------------------
@@ -430,9 +440,9 @@ export function extractTopics(transcriptItems: unknown[], topN = 20): string[] {
       text = snippets;
     }
 
-    const words = text.toLowerCase().match(/\b[a-z]{4,}\b/g) ?? [];
+    const words = text.toLowerCase().match(/\b[a-z]{2,}\b/g) ?? [];
     for (const word of words) {
-      if (!STOPWORDS.has(word)) {
+      if ((word.length >= 4 || TECH_TERMS.has(word)) && !STOPWORDS.has(word)) {
         freq[word] = (freq[word] ?? 0) + 1;
       }
     }
