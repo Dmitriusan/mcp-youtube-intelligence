@@ -41,7 +41,7 @@ server.tool(
   "Extract structured intelligence from a YouTube channel. Returns: channel metadata, sampled video IDs, word-frequency topics (topics), per-video structured topics (topics_structured) with theme/entities/tags from Gemini semantic analysis, and a note field indicating whether semantic or keyword-only analysis was used. Supported channel inputs: @handle (e.g. @fireship), youtube.com/@handle URL, /channel/UC... URL, bare UC... channel ID (24 chars), or legacy youtube.com/c/ and youtube.com/user/ URLs.",
   {
     channel_url: z.string().describe("YouTube channel URL or @handle (e.g. @fireship, https://www.youtube.com/@fireship, UCxxxxxxx)"),
-    max_videos: z.number().optional().default(5).describe("Number of recent videos to analyze (default 5, max 50)"),
+    max_videos: z.number().int().min(1).max(50).optional().default(5).describe("Number of recent videos to analyze (default 5, max 50)"),
   },
   async ({ channel_url, max_videos }) => {
     try {
