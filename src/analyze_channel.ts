@@ -482,6 +482,17 @@ export async function analyzeChannel(
   // Step 4a: Word-frequency topics (always computed — fallback if LLM fails)
   const topics = extractTopics(transcriptItems);
 
+  // Count only items where the transcript field contains actual content.
+  // Apify returns one item per video even when captions are unavailable,
+  // so raw transcriptItems.length overstates how many videos were actually transcribed.
+  const transcriptsAvailable = transcriptItems.filter((item) => {
+    const record = item as Record<string, unknown>;
+    const snippets = record["transcript"];
+    if (Array.isArray(snippets)) return snippets.length > 0;
+    if (typeof snippets === "string") return snippets.trim().length > 0;
+    return false;
+  }).length;
+
   // Step 4b: LLM semantic extraction via Gemini 2.5 Flash (primary route)
   let topics_structured: TopicStructured[] = [];
   let geminiUsed = false;
@@ -504,7 +515,7 @@ export async function analyzeChannel(
     channel_url: channelInput,
     sample_video_ids: videoIds,
     videos_analyzed: videoIds.length,
-    transcripts_available: transcriptItems.length,
+    transcripts_available: transcriptsAvailable,
     topics,
     topics_structured,
     note,
