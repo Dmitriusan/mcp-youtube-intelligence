@@ -841,3 +841,126 @@ describe("persistAnalysisResult", () => {
     expect(returnedPath).toMatch(/^\/env\/custom\/output\//);
   });
 });
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — transcripts_available only counts items with content
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (transcripts_available accuracy)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("excludes Apify items with empty transcript arrays from transcripts_available count", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCtest1234567890ABCDE12",
+            snippet: { title: "Test Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUtest1234567890ABCDE12" } },
+          },
+        ],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          { contentDetails: { videoId: "vid001" } },
+          { contentDetails: { videoId: "vid002" } },
+          { contentDetails: { videoId: "vid003" } },
+        ],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-001", defaultDatasetId: "ds-001", status: "RUNNING" },
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-001", defaultDatasetId: "ds-001", status: "SUCCEEDED" },
+      }),
+    });
+
+    // vid002 has an empty transcript array — captions unavailable for that video
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        { videoDetails: { videoId: "vid001" }, transcript: [{ text: "javascript programming tutorial" }] },
+        { videoDetails: { videoId: "vid002" }, transcript: [] },
+        { videoDetails: { videoId: "vid003" }, transcript: [{ text: "typescript type system basics" }] },
+      ],
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = analyzeChannel("@testchannel", 3);
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.videos_analyzed).toBe(3);
+    // Only vid001 and vid003 had transcript content — vid002 empty array excluded
+    expect(result.transcripts_available).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — empty uploads playlist
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (empty playlist)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    vi.restoreAllMocks();
+  });
+
+  it("throws 'No videos found' when the uploads playlist is empty", async () => {
+    const mockFetch = vi.fn();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCtest1234567890ABCDE12",
+            snippet: { title: "Empty Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUtest1234567890ABCDE12" } },
+          },
+        ],
+      }),
+    });
+
+    // Playlist API returns zero items — channel exists but has no public videos
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [] }),
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(analyzeChannel("@emptychannel", 5)).rejects.toThrow(/No videos found/);
+  });
+});
