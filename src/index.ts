@@ -38,7 +38,7 @@ const server = new McpServer({
 
 server.tool(
   "analyze_channel",
-  "Extract structured intelligence from a YouTube channel. Returns: channel metadata, sampled video IDs, word-frequency topics (topics), per-video structured topics (topics_structured) with theme/entities/tags from Gemini semantic analysis, and a note field indicating whether semantic or keyword-only analysis was used. Supported channel inputs: @handle (e.g. @fireship), youtube.com/@handle URL, /channel/UC... URL, bare UC... channel ID (24 chars), or legacy youtube.com/c/ and youtube.com/user/ URLs.",
+  "Analyze a YouTube channel and return a JSON object with: channel_id, channel_title, channel_url, sample_video_ids[], videos_analyzed (count of videos fetched from playlist), transcripts_available (count with actual caption content), topics[] (top keyword frequencies across all transcripts), topics_structured[] (per-video semantic analysis — each entry has video_id/theme/entities[]/tags[]), note (which analysis mode ran), and optional output_path (local artifact path). Requires YOUTUBE_API_KEY and APIFY_TOKEN; set GEMINI_API_KEY for topics_structured semantic analysis (falls back to keyword-only when absent). Supported channel inputs: @handle (e.g. @fireship), youtube.com/@handle URL, /channel/UC... URL, bare 24-char UCxxxxxx ID, or legacy /c/ and /user/ URLs.",
   {
     channel_url: z.string().describe("YouTube channel URL or @handle (e.g. @fireship, https://www.youtube.com/@fireship, UCxxxxxxx)"),
     max_videos: z.number().int().min(1).max(50).optional().default(5).describe("Number of recent videos to analyze (default 5, max 50)"),
