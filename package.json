@@ -1,6 +1,6 @@
 {
   "name": "mcp-youtube-intelligence",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "MCP server for extracting structured intelligence from YouTube channels and videos — transcripts, topics, competitive signals",
   "mcpName": "io.github.dmitriusan/mcp-youtube-intelligence",
   "main": "build/index.js",
