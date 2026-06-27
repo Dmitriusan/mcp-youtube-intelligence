@@ -816,6 +816,8 @@ describe("persistAnalysisResult", () => {
     const parsed = JSON.parse(content) as Record<string, unknown>;
     expect(parsed["channel_id"]).toBe("UCtest1234567890ABCDEFG");
     expect(parsed["channel_title"]).toBe("Test Channel");
+    expect(parsed["channel_url"]).toBe("@testchannel");
+    expect(parsed["sample_video_ids"]).toEqual(["vid1", "vid2"]);
     expect(parsed["video_count"]).toBe(2);
     expect(Array.isArray(parsed["topics_structured"])).toBe(true);
     expect((parsed["topics_structured"] as unknown[]).length).toBe(1);
@@ -923,6 +925,45 @@ describe("analyzeChannel (transcripts_available accuracy)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// runApifyTranscriptScraper — 4xx error during polling fails fast
+// ---------------------------------------------------------------------------
+describe("runApifyTranscriptScraper (4xx poll error)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("throws immediately on 404 during polling instead of waiting for timeout", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-deleted", defaultDatasetId: "ds-deleted", status: "RUNNING" },
+      }),
+    });
+
+    // Poll → 404 (run was deleted mid-flight)
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    const failExpectation = expect(resultPromise).rejects.toThrow(/Apify poll error 404/);
+    await vi.runAllTimersAsync();
+    await failExpectation;
+  });
+});
+
+// ---------------------------------------------------------------------------
 // analyzeChannel — empty uploads playlist
 // ---------------------------------------------------------------------------
 describe("analyzeChannel (empty playlist)", () => {
@@ -962,5 +1003,115 @@ describe("analyzeChannel (empty playlist)", () => {
     vi.stubGlobal("fetch", mockFetch);
 
     await expect(analyzeChannel("@emptychannel", 5)).rejects.toThrow(/No videos found/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — end-to-end with Gemini semantic extraction enabled
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (Gemini path, mocked fetch)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+    process.env["GEMINI_API_KEY"] = "test-gemini-key";
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    delete process.env["GEMINI_API_KEY"];
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("populates topics_structured via Gemini and reflects semantic path in note", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Call 1: YouTube channels API
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCVHVAPyVgjkAyfLiwbHyXyg",
+            snippet: { title: "Fireship" },
+            contentDetails: { relatedPlaylists: { uploads: "UUVHVAPyVgjkAyfLiwbHyXyg" } },
+          },
+        ],
+      }),
+    });
+
+    // Call 2: YouTube playlistItems API
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [{ contentDetails: { videoId: "vid001" } }],
+      }),
+    });
+
+    // Call 3: Apify start run
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-001", defaultDatasetId: "ds-001", status: "RUNNING" },
+      }),
+    });
+
+    // Call 4: Apify poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-001", defaultDatasetId: "ds-001", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Call 5: Apify dataset items
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          videoDetails: { videoId: "vid001" },
+          transcript: [{ text: "react hooks typescript frontend performance optimization" }],
+        },
+      ],
+    });
+
+    // Call 6: Gemini generateContent for vid001
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    theme: "React performance optimization with TypeScript",
+                    entities: ["React", "TypeScript"],
+                    tags: ["react", "typescript", "frontend", "performance"],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = analyzeChannel("@fireship", 1);
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.topics_structured).toHaveLength(1);
+    expect(result.topics_structured[0].video_id).toBe("vid001");
+    expect(result.topics_structured[0].theme).toBe("React performance optimization with TypeScript");
+    expect(result.topics_structured[0].entities).toContain("React");
+    expect(result.topics_structured[0].tags).toContain("performance");
+    expect(result.note).toContain("semantic topics");
+    expect(result.note).toContain("Gemini");
+    expect(result.note).toContain("1 with transcripts");
   });
 });

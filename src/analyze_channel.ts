@@ -235,7 +235,13 @@ export async function runApifyTranscriptScraper(
     const statusResp = await fetch(`${APIFY_BASE}/actor-runs/${runId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!statusResp.ok) continue; // transient — keep polling
+    if (!statusResp.ok) {
+      // 4xx = permanent error (invalid run ID, bad token) — fail fast instead of polling to timeout
+      if (statusResp.status >= 400 && statusResp.status < 500) {
+        throw new Error(`Apify poll error ${statusResp.status} for run ${runId}`);
+      }
+      continue; // 5xx or network transient — keep polling
+    }
     const statusBody = await statusResp.json() as { data: ApifyRunData };
     lastStatus = statusBody.data.status;
     if (lastStatus === "SUCCEEDED") break;
@@ -278,6 +284,8 @@ export function persistAnalysisResult(
     const payload = {
       channel_id: result.channel_id,
       channel_title: result.channel_title,
+      channel_url: result.channel_url,
+      sample_video_ids: result.sample_video_ids,
       video_count: result.videos_analyzed,
       topics_structured: result.topics_structured,
       topics: result.topics,
@@ -506,8 +514,8 @@ export async function analyzeChannel(
   }
 
   const note = geminiUsed
-    ? `Analyzed ${videoIds.length} video(s) — semantic topics (topics_structured) via Gemini, keyword topics (topics) as supplemental.`
-    : `Analyzed ${videoIds.length} video(s) — keyword topics only (Gemini unavailable or not configured). Set GEMINI_API_KEY for richer structured analysis.`;
+    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — semantic topics (topics_structured) via Gemini, keyword topics (topics) as supplemental.`
+    : `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — keyword topics only (Gemini unavailable or not configured). Set GEMINI_API_KEY for richer structured analysis.`;
 
   const result: AnalyzeChannelResult = {
     channel_id: channel.channelId,
