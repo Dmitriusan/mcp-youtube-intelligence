@@ -1007,6 +1007,207 @@ describe("analyzeChannel (empty playlist)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// runApifyTranscriptScraper — start-run failure
+// ---------------------------------------------------------------------------
+describe("runApifyTranscriptScraper (start-run failure)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("throws immediately when the Apify start-run request returns a non-ok status", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      text: async () => "Unauthorized",
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      runApifyTranscriptScraper(["https://www.youtube.com/watch?v=test123"], "bad-token"),
+    ).rejects.toThrow(/Apify start run failed 401/);
+
+    // Should not attempt to poll — only one fetch call
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractTopicsWithLLM — Gemini 5xx retry
+// ---------------------------------------------------------------------------
+describe("extractTopicsWithLLM (5xx retry)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("retries once on 5xx overload and returns result when the retry succeeds", async () => {
+    const mockFetch = vi.fn()
+      // First call → 503 Overloaded
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" })
+      // Retry → 200 OK
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      theme: "Backend engineering best practices",
+                      entities: ["Node.js", "PostgreSQL"],
+                      tags: ["backend", "nodejs", "database"],
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid001" },
+        transcript: [{ text: "node postgres backend engineering practices" }],
+      },
+    ];
+
+    const result = await extractTopicsWithLLM(items, "test-key");
+    expect(result).toHaveLength(1);
+    expect(result[0].theme).toBe("Backend engineering best practices");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws after retry when both 5xx attempts fail", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" })
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Still overloaded" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid001" },
+        transcript: [{ text: "some content here" }],
+      },
+    ];
+
+    await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 503/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry on 4xx client errors", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      text: async () => "Bad Request",
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid001" },
+        transcript: [{ text: "some content here" }],
+      },
+    ];
+
+    await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 400/);
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — Gemini graceful degradation when key is set but API fails
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (Gemini degradation with key set)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+    process.env["GEMINI_API_KEY"] = "test-gemini-key";
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    delete process.env["GEMINI_API_KEY"];
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("falls back to keyword topics and reports degraded note when Gemini API fails persistently", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Call 1: YouTube channels API
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCtest1234567890ABCDE12",
+            snippet: { title: "Tech Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUtest1234567890ABCDE12" } },
+          },
+        ],
+      }),
+    });
+
+    // Call 2: YouTube playlistItems API
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [{ contentDetails: { videoId: "vid001" } }],
+      }),
+    });
+
+    // Call 3: Apify start run
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-001", defaultDatasetId: "ds-001", status: "RUNNING" },
+      }),
+    });
+
+    // Call 4: Apify poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-001", defaultDatasetId: "ds-001", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Call 5: Apify dataset items
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          videoDetails: { videoId: "vid001" },
+          transcript: [{ text: "javascript typescript programming node framework" }],
+        },
+      ],
+    });
+
+    // Calls 6+7: Gemini first attempt + retry both fail with 503
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" });
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = analyzeChannel("@techchannel", 1);
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    // Should succeed with keyword fallback
+    expect(result.channel_id).toBe("UCtest1234567890ABCDE12");
+    expect(result.topics_structured).toEqual([]);
+    expect(result.topics.length).toBeGreaterThan(0);
+    expect(result.topics).toContain("javascript");
+    // Note should indicate Gemini was unavailable
+    expect(result.note).toContain("keyword topics only");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // analyzeChannel — end-to-end with Gemini semantic extraction enabled
 // ---------------------------------------------------------------------------
 describe("analyzeChannel (Gemini path, mocked fetch)", () => {
