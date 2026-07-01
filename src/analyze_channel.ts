@@ -394,7 +394,7 @@ ${truncated}`;
       },
     };
 
-    const resp = await fetch(
+    let resp = await fetch(
       `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
       {
         method: "POST",
@@ -402,6 +402,18 @@ ${truncated}`;
         body: JSON.stringify(requestBody),
       },
     );
+
+    // Retry once on transient server errors (Gemini 503 overloaded is common)
+    if (!resp.ok && resp.status >= 500) {
+      resp = await fetch(
+        `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        },
+      );
+    }
 
     if (!resp.ok) {
       throw new Error(`Gemini API error ${resp.status}: ${await resp.text()}`);
@@ -514,8 +526,8 @@ export async function analyzeChannel(
   }
 
   const note = geminiUsed
-    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — semantic topics (topics_structured) via Gemini, keyword topics (topics) as supplemental.`
-    : `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — keyword topics only (Gemini unavailable or not configured). Set GEMINI_API_KEY for richer structured analysis.`;
+    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics_structured.length} semantic topics (topics_structured) via Gemini, ${topics.length} keyword topics as supplemental.`
+    : `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (Gemini unavailable or not configured). Set GEMINI_API_KEY for richer structured analysis.`;
 
   const result: AnalyzeChannelResult = {
     channel_id: channel.channelId,
