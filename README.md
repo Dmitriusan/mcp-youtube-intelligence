@@ -5,10 +5,9 @@ MCP server for extracting structured intelligence from YouTube channels and vide
 ## What it does
 
 Analyzes YouTube channels to produce structured intelligence reports:
-- Transcript extraction across recent videos
-- Topic frequency and trend analysis
-- Competitive signal detection (product mentions, competitor references)
-- Content positioning analysis
+- Transcript extraction across recent videos (up to 50 videos)
+- Semantic topic extraction per video via Gemini (theme, named entities, tags)
+- Keyword frequency analysis across all transcripts (fallback when Gemini is unavailable)
 
 ## Prerequisites
 
@@ -36,7 +35,10 @@ npm install -g mcp-youtube-intelligence
 
 ## Usage
 
-Add to your Claude Desktop / MCP client config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Add to your Claude Desktop / MCP client config:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
