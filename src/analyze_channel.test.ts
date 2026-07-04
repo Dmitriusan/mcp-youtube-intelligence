@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, writeFileSync, readFileSync } from "fs";
 import {
   parseChannelInput,
   extractTopics,
@@ -9,15 +9,26 @@ import {
   runApifyTranscriptScraper,
   analyzeChannel,
   persistAnalysisResult,
+  getApifyToken,
+  getYouTubeApiKey,
+  getGeminiApiKey,
   TRANSCRIPT_ACTOR_ID,
   type AnalyzeChannelResult,
 } from "./analyze_channel.js";
 
-// Mock fs so that mkdirSync/writeFileSync are no-ops in all tests (persistence side-effect),
-// while readFileSync (used by loadEnvKey) stays real so secret loading works normally.
+// Mock fs: mkdirSync/writeFileSync are no-ops (persistence side-effect suppressed);
+// readFileSync is a spy wrapping the real implementation so loadEnvKey still works
+// in normal tests, but individual tests can override it with mockImplementationOnce.
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
-  return { ...actual, mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+  return {
+    ...actual,
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    readFileSync: vi.fn((...args: Parameters<typeof actual.readFileSync>) =>
+      actual.readFileSync(...args as [Parameters<typeof actual.readFileSync>[0], Parameters<typeof actual.readFileSync>[1]]),
+    ),
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -179,6 +190,51 @@ describe("extractTopics", () => {
     expect(topics).toHaveLength(2);
     expect(topics).toContain("javascript");
     expect(topics).toContain("typescript");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// credential helpers — env var loading and error messages
+// ---------------------------------------------------------------------------
+describe("credential helpers", () => {
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    delete process.env["GEMINI_API_KEY"];
+  });
+
+  it("getApifyToken returns value from APIFY_TOKEN env var", () => {
+    process.env["APIFY_TOKEN"] = "apify-env-token";
+    expect(getApifyToken()).toBe("apify-env-token");
+  });
+
+  it("getYouTubeApiKey returns value from YOUTUBE_API_KEY env var", () => {
+    process.env["YOUTUBE_API_KEY"] = "yt-env-key";
+    expect(getYouTubeApiKey()).toBe("yt-env-key");
+  });
+
+  it("getGeminiApiKey returns value from GEMINI_API_KEY env var", () => {
+    process.env["GEMINI_API_KEY"] = "gemini-env-key";
+    expect(getGeminiApiKey()).toBe("gemini-env-key");
+  });
+
+  it("getApifyToken throws with descriptive message when env var absent and secrets file unreadable", () => {
+    delete process.env["APIFY_TOKEN"];
+    // mockImplementationOnce expires after one call — no persistent state to clean up
+    vi.mocked(readFileSync).mockImplementationOnce(() => { throw new Error("ENOENT"); });
+    expect(() => getApifyToken()).toThrow(/APIFY_TOKEN not configured/);
+  });
+
+  it("getYouTubeApiKey throws with descriptive message when env var absent and secrets file unreadable", () => {
+    delete process.env["YOUTUBE_API_KEY"];
+    vi.mocked(readFileSync).mockImplementationOnce(() => { throw new Error("ENOENT"); });
+    expect(() => getYouTubeApiKey()).toThrow(/YOUTUBE_API_KEY not configured/);
+  });
+
+  it("getGeminiApiKey throws with descriptive message when env var absent and secrets file unreadable", () => {
+    delete process.env["GEMINI_API_KEY"];
+    vi.mocked(readFileSync).mockImplementationOnce(() => { throw new Error("ENOENT"); });
+    expect(() => getGeminiApiKey()).toThrow(/GEMINI_API_KEY not configured/);
   });
 });
 
@@ -1202,8 +1258,9 @@ describe("analyzeChannel (Gemini degradation with key set)", () => {
     expect(result.topics_structured).toEqual([]);
     expect(result.topics.length).toBeGreaterThan(0);
     expect(result.topics).toContain("javascript");
-    // Note should indicate Gemini was unavailable
+    // Note must distinguish "API error" (key was set) from "not configured"
     expect(result.note).toContain("keyword topics only");
+    expect(result.note).toContain("Gemini API error");
   });
 });
 
