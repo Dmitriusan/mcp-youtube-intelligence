@@ -516,8 +516,10 @@ export async function analyzeChannel(
   // Step 4b: LLM semantic extraction via Gemini 2.5 Flash (primary route)
   let topics_structured: TopicStructured[] = [];
   let geminiUsed = false;
+  let geminiConfigured = false;
   try {
     const geminiKey = getGeminiApiKey();
+    geminiConfigured = true;
     topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey);
     geminiUsed = true;
   } catch (err) {
@@ -527,7 +529,9 @@ export async function analyzeChannel(
 
   const note = geminiUsed
     ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics_structured.length} semantic topics (topics_structured) via Gemini, ${topics.length} keyword topics as supplemental.`
-    : `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (Gemini unavailable or not configured). Set GEMINI_API_KEY for richer structured analysis.`;
+    : geminiConfigured
+    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (Gemini API error — check logs for details).`
+    : `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (GEMINI_API_KEY not configured). Set GEMINI_API_KEY for richer structured analysis.`;
 
   const result: AnalyzeChannelResult = {
     channel_id: channel.channelId,
