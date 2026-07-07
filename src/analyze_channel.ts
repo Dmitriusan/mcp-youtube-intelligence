@@ -194,8 +194,8 @@ export async function getRecentVideoIds(
   const resp = await fetch(apiUrl);
   if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}`);
   const data = await resp.json() as YtApiResponse;
-  const items = (data.items ?? []) as Array<{ contentDetails: { videoId: string } }>;
-  return items.map((item) => item.contentDetails.videoId).filter(Boolean);
+  const items = (data.items ?? []) as Array<{ contentDetails?: { videoId?: string } }>;
+  return items.map((item) => item.contentDetails?.videoId).filter((id): id is string => Boolean(id));
 }
 
 // ---------------------------------------------------------------------------

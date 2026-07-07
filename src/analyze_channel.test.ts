@@ -608,6 +608,23 @@ describe("getRecentVideoIds", () => {
     );
   });
 
+  it("skips playlist items with missing contentDetails without throwing", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          { contentDetails: { videoId: "vid001" } },
+          { /* no contentDetails — malformed API item */ },
+          { contentDetails: { videoId: "vid003" } },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await getRecentVideoIds("PLtest1234", 3, "test-key");
+    expect(result).toEqual(["vid001", "vid003"]);
+  });
+
   it("filters out playlist items with empty videoId", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: true,
