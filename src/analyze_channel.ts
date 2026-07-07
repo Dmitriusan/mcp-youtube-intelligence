@@ -25,7 +25,7 @@ const CORP_SECRETS_DIR = "/media/development/irrationals/IrrationalCorp/secrets"
 
 const APIFY_POLL_INTERVAL_MS = 15_000;
 const APIFY_MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes
-const GEMINI_TRANSCRIPT_WORD_LIMIT = 300;
+const GEMINI_TRANSCRIPT_WORD_LIMIT = 1000;
 const DEFAULT_OUTPUT_DIR = "./output/";
 const MAX_VIDEOS = 50;
 

@@ -526,6 +526,30 @@ describe("extractTopicsWithLLM", () => {
     expect(result[0].tags).toEqual([]);
   });
 
+  it("truncates transcript to 1000 words before sending to Gemini", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ theme: "test", entities: [], tags: [] }) }] } }],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    // Build a transcript with 1200 unique-ish words
+    const longTranscript = Array.from({ length: 1200 }, (_, i) => `word${i}`).join(" ");
+    const items = [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: longTranscript }] }];
+
+    await extractTopicsWithLLM(items, "test-key");
+
+    const requestBody = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string) as {
+      contents: Array<{ parts: Array<{ text: string }> }>;
+    };
+    const sentPrompt = requestBody.contents[0].parts[0].text;
+    // Transcript portion in the prompt should contain word0 through word999 but not word1000+
+    expect(sentPrompt).toContain("word999");
+    expect(sentPrompt).not.toContain("word1000");
+  });
+
   it("throws when Gemini returns a non-ok HTTP status", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: false,
