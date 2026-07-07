@@ -707,6 +707,49 @@ describe("runApifyTranscriptScraper (terminal statuses)", () => {
     await failExpectation;
   });
 
+  it("continues polling when a 5xx response is received during status check", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-5xx", defaultDatasetId: "ds-5xx", status: "RUNNING" },
+      }),
+    });
+
+    // First poll → 503 transient error (should not fail fast)
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503 });
+
+    // Second poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-5xx", defaultDatasetId: "ds-5xx", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: "content" }] }],
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result).toHaveLength(1);
+    // 4 calls total: start run, poll (503), poll (SUCCEEDED), dataset fetch
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
   it.each(["ABORTED", "TIMED-OUT"] as const)(
     "throws when Apify run ends with %s status",
     async (terminalStatus) => {
