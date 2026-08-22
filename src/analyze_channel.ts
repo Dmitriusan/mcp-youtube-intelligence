@@ -351,6 +351,8 @@ export async function extractTopicsWithLLM(
   geminiApiKey: string,
 ): Promise<TopicStructured[]> {
   const results: TopicStructured[] = [];
+  let attempted = 0;
+  let lastRequestError: string | undefined;
 
   for (const item of transcriptItems) {
     const record = item as Record<string, unknown>;
@@ -394,18 +396,9 @@ ${truncated}`;
       },
     };
 
-    let resp = await fetch(
-      `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      },
-    );
-
-    // Retry once on transient server errors (Gemini 503 overloaded is common)
-    if (!resp.ok && resp.status >= 500) {
-      resp = await fetch(
+    attempted++;
+    try {
+      let resp = await fetch(
         `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
         {
           method: "POST",
@@ -413,28 +406,52 @@ ${truncated}`;
           body: JSON.stringify(requestBody),
         },
       );
-    }
 
-    if (!resp.ok) {
-      throw new Error(`Gemini API error ${resp.status}: ${await resp.text()}`);
-    }
+      // Retry once on transient server errors (Gemini 503 overloaded is common)
+      if (!resp.ok && resp.status >= 500) {
+        resp = await fetch(
+          `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody),
+          },
+        );
+      }
 
-    const body = await resp.json() as GeminiResponse;
-    const text = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-    let parsed: { theme?: string; entities?: string[]; tags?: string[] } = {};
-    try {
-      parsed = JSON.parse(text) as typeof parsed;
-    } catch {
-      console.warn(`[analyze_channel] Gemini returned unparseable JSON for video ${videoId}, skipping`);
-      continue;
-    }
+      if (!resp.ok) {
+        throw new Error(`Gemini API error ${resp.status}: ${await resp.text()}`);
+      }
 
-    results.push({
-      video_id: videoId,
-      theme: parsed.theme ?? "",
-      entities: parsed.entities ?? [],
-      tags: parsed.tags ?? [],
-    });
+      const body = await resp.json() as GeminiResponse;
+      const text = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+      let parsed: { theme?: string; entities?: string[]; tags?: string[] } = {};
+      try {
+        parsed = JSON.parse(text) as typeof parsed;
+      } catch {
+        console.warn(`[analyze_channel] Gemini returned unparseable JSON for video ${videoId}, skipping`);
+        continue;
+      }
+
+      results.push({
+        video_id: videoId,
+        theme: parsed.theme ?? "",
+        entities: parsed.entities ?? [],
+        tags: parsed.tags ?? [],
+      });
+    } catch (err) {
+      // Isolate this video's failure so one bad request doesn't discard
+      // structured topics already extracted for the rest of the channel's videos.
+      lastRequestError = err instanceof Error ? err.message : String(err);
+      console.warn(`[analyze_channel] Gemini request failed for video ${videoId}, skipping: ${lastRequestError}`);
+    }
+  }
+
+  // Every attempted video failed at the HTTP level — surface it as a total
+  // failure so analyzeChannel's note reports a Gemini outage instead of
+  // silently claiming success with zero structured topics.
+  if (attempted > 0 && results.length === 0 && lastRequestError) {
+    throw new Error(lastRequestError);
   }
 
   return results;

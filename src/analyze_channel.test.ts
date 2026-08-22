@@ -595,6 +595,37 @@ describe("extractTopicsWithLLM", () => {
     expect(result[0].video_id).toBe("vid002");
     expect(result[0].theme).toBe("Testing strategies");
   });
+
+  it("keeps structured topics from videos that succeeded when one video's Gemini request fails", async () => {
+    const mockFetch = vi.fn()
+      // vid001 — succeeds
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: JSON.stringify({ theme: "First video", entities: [], tags: [] }) }] } }],
+        }),
+      })
+      // vid002 — persistent 400, not retried, must not wipe out vid001's result
+      .mockResolvedValueOnce({ ok: false, status: 400, text: async () => "Content policy violation" })
+      // vid003 — succeeds
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: JSON.stringify({ theme: "Third video", entities: [], tags: [] }) }] } }],
+        }),
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "first video content" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [{ text: "second video content" }] },
+      { videoDetails: { videoId: "vid003" }, transcript: [{ text: "third video content" }] },
+    ];
+
+    const result = await extractTopicsWithLLM(items, "test-key");
+    expect(result).toHaveLength(2);
+    expect(result.map((r) => r.video_id)).toEqual(["vid001", "vid003"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
