@@ -655,11 +655,11 @@ describe("getRecentVideoIds", () => {
   });
 
   it("throws when the playlistItems API returns a non-ok status", async () => {
-    const mockFetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 403 });
+    const mockFetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 403, text: async () => "Forbidden" });
     vi.stubGlobal("fetch", mockFetch);
 
     await expect(getRecentVideoIds("PLtest1234", 3, "test-key")).rejects.toThrow(
-      /playlistItems API error 403/,
+      /playlistItems API error 403: Forbidden/,
     );
   });
 
@@ -957,6 +957,19 @@ describe("resolveChannel", () => {
     expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringContaining("search?"));
   });
 
+  it("throws on non-ok HTTP response from the search API custom_url fallback", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: async () => "Daily quota exceeded",
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      resolveChannel("https://www.youtube.com/c/fireship", "test-api-key"),
+    ).rejects.toThrow(/YouTube search API error 403: Daily quota exceeded/);
+  });
+
   it("throws 'Channel not found' when search returns no results for legacy /user/ URL", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: true,
@@ -1140,6 +1153,7 @@ describe("runApifyTranscriptScraper (4xx poll error)", () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,
       status: 404,
+      text: async () => "Run not found",
     });
 
     vi.stubGlobal("fetch", mockFetch);
@@ -1219,6 +1233,53 @@ describe("runApifyTranscriptScraper (start-run failure)", () => {
 
     // Should not attempt to poll — only one fetch call
     expect(mockFetch).toHaveBeenCalledOnce();
+  });
+});
+
+describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("throws with response body when the dataset items fetch returns a non-ok status", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-fail", defaultDatasetId: "ds-fail", status: "RUNNING" },
+      }),
+    });
+
+    // Poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-fail", defaultDatasetId: "ds-fail", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch → 500
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => "Internal error retrieving dataset",
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    const failExpectation = expect(resultPromise).rejects.toThrow(
+      /Apify dataset fetch failed 500: Internal error retrieving dataset/,
+    );
+    await vi.runAllTimersAsync();
+    await failExpectation;
   });
 });
 

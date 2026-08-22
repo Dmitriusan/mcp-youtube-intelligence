@@ -154,7 +154,7 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
     // custom_url — fall back to search (costs 100 quota units); rare path
     const searchUrl = `${YT_API_BASE}/search?part=snippet&type=channel&q=${encodeURIComponent(parsed.value)}&maxResults=1&key=${apiKey}`;
     const searchResp = await fetch(searchUrl);
-    if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}`);
+    if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}: ${await searchResp.text()}`);
     const searchData = await searchResp.json() as YtApiResponse;
     const items = searchData.items ?? [];
     if (!items.length) throw new Error(`Channel not found for custom URL: ${input}`);
@@ -198,7 +198,7 @@ export async function getRecentVideoIds(
     `&maxResults=${maxResults}` +
     `&key=${apiKey}`;
   const resp = await fetch(apiUrl);
-  if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}`);
+  if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}: ${await resp.text()}`);
   const data = await resp.json() as YtApiResponse;
   const items = (data.items ?? []) as Array<{ contentDetails?: { videoId?: string } }>;
   return items.map((item) => item.contentDetails?.videoId).filter((id): id is string => Boolean(id));
@@ -244,7 +244,7 @@ export async function runApifyTranscriptScraper(
     if (!statusResp.ok) {
       // 4xx = permanent error (invalid run ID, bad token) — fail fast instead of polling to timeout
       if (statusResp.status >= 400 && statusResp.status < 500) {
-        throw new Error(`Apify poll error ${statusResp.status} for run ${runId}`);
+        throw new Error(`Apify poll error ${statusResp.status} for run ${runId}: ${await statusResp.text()}`);
       }
       continue; // 5xx or network transient — keep polling
     }
@@ -266,7 +266,7 @@ export async function runApifyTranscriptScraper(
   const itemsResp = await fetch(`${APIFY_BASE}/datasets/${datasetId}/items?limit=100`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}`);
+  if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}: ${await itemsResp.text()}`);
   return await itemsResp.json() as unknown[];
 }
 
