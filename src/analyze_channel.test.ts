@@ -877,6 +877,26 @@ describe("resolveChannel", () => {
     await expect(resolveChannel("@unknown", "test-api-key")).rejects.toThrow(/Channel not found/);
   });
 
+  it("throws a descriptive error when the channel has no uploads playlist", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCterminated00000000000",
+            snippet: { title: "Terminated Channel" },
+            contentDetails: {},
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@terminated", "test-api-key")).rejects.toThrow(
+      /no uploads playlist/,
+    );
+  });
+
   it("throws on non-ok HTTP response from channels API", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: false,

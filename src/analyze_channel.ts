@@ -172,11 +172,17 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
 
   const item = items[0];
   const snippet = item["snippet"] as Record<string, string>;
-  const contentDetails = item["contentDetails"] as { relatedPlaylists: Record<string, string> };
+  const contentDetails = item["contentDetails"] as { relatedPlaylists?: Record<string, string> } | undefined;
+  const uploadsPlaylistId = contentDetails?.relatedPlaylists?.["uploads"];
+  if (!uploadsPlaylistId) {
+    throw new Error(
+      `Channel "${input}" has no uploads playlist (it may be terminated, suspended, or otherwise unavailable).`,
+    );
+  }
 
   return {
     channelId: item["id"] as string,
-    uploadsPlaylistId: contentDetails.relatedPlaylists["uploads"],
+    uploadsPlaylistId,
     title: snippet["title"],
   };
 }
