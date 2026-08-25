@@ -28,6 +28,22 @@ const APIFY_MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes
 const GEMINI_TRANSCRIPT_WORD_LIMIT = 1000;
 const DEFAULT_OUTPUT_DIR = "./output/";
 const MAX_VIDEOS = 50;
+const FETCH_TIMEOUT_MS = 30_000; // bound every outbound request so a stalled external API can't hang the tool call indefinitely
+
+// ---------------------------------------------------------------------------
+// Fetch helper
+// ---------------------------------------------------------------------------
+
+async function fetchWithTimeout(url: string, options: RequestInit, label: string): Promise<Response> {
+  try {
+    return await fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      throw new Error(`${label} timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,16 +169,17 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
   } else {
     // custom_url — fall back to search (costs 100 quota units); rare path
     const searchUrl = `${YT_API_BASE}/search?part=snippet&type=channel&q=${encodeURIComponent(parsed.value)}&maxResults=1&key=${apiKey}`;
-    const searchResp = await fetch(searchUrl);
+    const searchResp = await fetchWithTimeout(searchUrl, {}, "YouTube search API");
     if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}: ${await searchResp.text()}`);
     const searchData = await searchResp.json() as YtApiResponse;
     const items = searchData.items ?? [];
     if (!items.length) throw new Error(`Channel not found for custom URL: ${input}`);
-    const channelId = ((items[0]["id"] as Record<string, string>)["channelId"]) as string;
+    const channelId = (items[0]["id"] as Record<string, string> | undefined)?.["channelId"];
+    if (!channelId) throw new Error(`Channel not found for custom URL: ${input} (search result had no channel ID)`);
     return resolveChannel(channelId, apiKey);
   }
 
-  const resp = await fetch(apiUrl);
+  const resp = await fetchWithTimeout(apiUrl, {}, "YouTube channels API");
   if (!resp.ok) throw new Error(`YouTube channels API error ${resp.status}: ${await resp.text()}`);
   const data = await resp.json() as YtApiResponse;
 
@@ -197,7 +214,7 @@ export async function getRecentVideoIds(
     `&playlistId=${encodeURIComponent(uploadsPlaylistId)}` +
     `&maxResults=${maxResults}` +
     `&key=${apiKey}`;
-  const resp = await fetch(apiUrl);
+  const resp = await fetchWithTimeout(apiUrl, {}, "YouTube playlistItems API");
   if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}: ${await resp.text()}`);
   const data = await resp.json() as YtApiResponse;
   const items = (data.items ?? []) as Array<{ contentDetails?: { videoId?: string } }>;
@@ -219,13 +236,14 @@ export async function runApifyTranscriptScraper(
   token: string,
 ): Promise<unknown[]> {
   // Start actor run — 1GB memory is enough for a few videos
-  const runResp = await fetch(
+  const runResp = await fetchWithTimeout(
     `${APIFY_BASE}/acts/${TRANSCRIPT_ACTOR_ID}/runs?memory=1024&timeout=300`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ urls: videoUrls.map((url) => ({ url })) }),
     },
+    "Apify start run",
   );
   if (!runResp.ok) {
     throw new Error(`Apify start run failed ${runResp.status}: ${await runResp.text()}`);
@@ -238,9 +256,17 @@ export async function runApifyTranscriptScraper(
   let lastStatus = "RUNNING";
   while (Date.now() < deadline) {
     await sleep(APIFY_POLL_INTERVAL_MS);
-    const statusResp = await fetch(`${APIFY_BASE}/actor-runs/${runId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    let statusResp: Response;
+    try {
+      statusResp = await fetchWithTimeout(
+        `${APIFY_BASE}/actor-runs/${runId}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        "Apify poll",
+      );
+    } catch {
+      // Connection error or per-request timeout — genuinely transient, same as a 5xx below.
+      continue;
+    }
     if (!statusResp.ok) {
       // 4xx = permanent error (invalid run ID, bad token) — fail fast instead of polling to timeout
       if (statusResp.status >= 400 && statusResp.status < 500) {
@@ -263,9 +289,11 @@ export async function runApifyTranscriptScraper(
   }
 
   // Fetch dataset items
-  const itemsResp = await fetch(`${APIFY_BASE}/datasets/${datasetId}/items?limit=100`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const itemsResp = await fetchWithTimeout(
+    `${APIFY_BASE}/datasets/${datasetId}/items?limit=100`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    "Apify dataset fetch",
+  );
   if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}: ${await itemsResp.text()}`);
   return await itemsResp.json() as unknown[];
 }
@@ -404,24 +432,26 @@ ${truncated}`;
 
     attempted++;
     try {
-      let resp = await fetch(
+      let resp = await fetchWithTimeout(
         `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody),
         },
+        "Gemini API",
       );
 
       // Retry once on transient server errors (Gemini 503 overloaded is common)
       if (!resp.ok && resp.status >= 500) {
-        resp = await fetch(
+        resp = await fetchWithTimeout(
           `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(requestBody),
           },
+          "Gemini API",
         );
       }
 

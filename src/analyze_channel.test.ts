@@ -651,7 +651,7 @@ describe("getRecentVideoIds", () => {
 
     const result = await getRecentVideoIds("PLtest1234", 3, "test-key");
     expect(result).toEqual(["vid001", "vid002", "vid003"]);
-    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("PLtest1234"));
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("PLtest1234"), expect.any(Object));
   });
 
   it("throws when the playlistItems API returns a non-ok status", async () => {
@@ -781,6 +781,49 @@ describe("runApifyTranscriptScraper (terminal statuses)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
+  it("continues polling when a poll request rejects with a network error", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-neterr", defaultDatasetId: "ds-neterr", status: "RUNNING" },
+      }),
+    });
+
+    // First poll → connection reset (fetch itself rejects, not an HTTP error response)
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET"));
+
+    // Second poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-neterr", defaultDatasetId: "ds-neterr", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: "content" }] }],
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result).toHaveLength(1);
+    // 4 calls total: start run, poll (rejects), poll (SUCCEEDED), dataset fetch — the run is not aborted by the transient failure
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
   it.each(["ABORTED", "TIMED-OUT"] as const)(
     "throws when Apify run ends with %s status",
     async (terminalStatus) => {
@@ -843,7 +886,7 @@ describe("resolveChannel", () => {
     expect(result.channelId).toBe("UCtest1234567890ABCDE12");
     expect(result.title).toBe("Test Channel");
     expect(result.uploadsPlaylistId).toBe("UUtest1234567890ABCDE12");
-    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("forHandle="));
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("forHandle="), expect.any(Object));
   });
 
   it("resolves bare UC... channel ID via id parameter", async () => {
@@ -864,7 +907,7 @@ describe("resolveChannel", () => {
     const result = await resolveChannel("UCVHVAPyVgjkAyfLiwbHyXyg", "test-api-key");
     expect(result.channelId).toBe("UCVHVAPyVgjkAyfLiwbHyXyg");
     expect(result.uploadsPlaylistId).toBe("UUVHVAPyVgjkAyfLiwbHyXyg");
-    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("id=UCVHVAPyVgjkAyfLiwbHyXyg"));
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("id=UCVHVAPyVgjkAyfLiwbHyXyg"), expect.any(Object));
   });
 
   it("throws 'Channel not found' when API returns empty items array", async () => {
@@ -954,7 +997,22 @@ describe("resolveChannel", () => {
     expect(result.title).toBe("Fireship");
     expect(result.uploadsPlaylistId).toBe("UUVHVAPyVgjkAyfLiwbHyXyg");
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringContaining("search?"));
+    expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringContaining("search?"), expect.any(Object));
+  });
+
+  it("throws 'Channel not found' when the search result for a custom URL has no channelId", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      // type=channel search hit with a malformed/unexpected id shape — no channelId field
+      json: async () => ({ items: [{ id: {}, snippet: { title: "Odd Result" } }] }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      resolveChannel("https://www.youtube.com/c/fireship", "test-api-key"),
+    ).rejects.toThrow(/Channel not found for custom URL/);
+    // Must not recurse into a second fetch with an undefined channel ID
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("throws on non-ok HTTP response from the search API custom_url fallback", async () => {
