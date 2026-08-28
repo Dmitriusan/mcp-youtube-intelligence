@@ -45,6 +45,20 @@ async function fetchWithTimeout(url: string, options: RequestInit, label: string
   }
 }
 
+// A 2xx status does not guarantee a parseable (or expected-shape) JSON body —
+// proxies/gateways can return HTML error pages with a 200, and flaky connections
+// can truncate a response. Surface those as the same kind of descriptive error
+// every other failure mode in this file produces, instead of a bare native
+// "Unexpected token < in JSON at position 0" SyntaxError.
+async function parseJsonResponse<T>(resp: Response, label: string): Promise<T> {
+  try {
+    return await resp.json() as T;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`${label}: response was not valid JSON (status ${resp.status}): ${detail}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -171,7 +185,7 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
     const searchUrl = `${YT_API_BASE}/search?part=snippet&type=channel&q=${encodeURIComponent(parsed.value)}&maxResults=1&key=${apiKey}`;
     const searchResp = await fetchWithTimeout(searchUrl, {}, "YouTube search API");
     if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}: ${await searchResp.text()}`);
-    const searchData = await searchResp.json() as YtApiResponse;
+    const searchData = await parseJsonResponse<YtApiResponse>(searchResp, "YouTube search API");
     const items = searchData.items ?? [];
     if (!items.length) throw new Error(`Channel not found for custom URL: ${input}`);
     const channelId = (items[0]["id"] as Record<string, string> | undefined)?.["channelId"];
@@ -181,7 +195,7 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
 
   const resp = await fetchWithTimeout(apiUrl, {}, "YouTube channels API");
   if (!resp.ok) throw new Error(`YouTube channels API error ${resp.status}: ${await resp.text()}`);
-  const data = await resp.json() as YtApiResponse;
+  const data = await parseJsonResponse<YtApiResponse>(resp, "YouTube channels API");
 
   if (data.error) throw new Error(`YouTube API: ${data.error.message}`);
   const items = data.items ?? [];
@@ -216,7 +230,7 @@ export async function getRecentVideoIds(
     `&key=${apiKey}`;
   const resp = await fetchWithTimeout(apiUrl, {}, "YouTube playlistItems API");
   if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}: ${await resp.text()}`);
-  const data = await resp.json() as YtApiResponse;
+  const data = await parseJsonResponse<YtApiResponse>(resp, "YouTube playlistItems API");
   const items = (data.items ?? []) as Array<{ contentDetails?: { videoId?: string } }>;
   return items.map((item) => item.contentDetails?.videoId).filter((id): id is string => Boolean(id));
 }
@@ -248,7 +262,10 @@ export async function runApifyTranscriptScraper(
   if (!runResp.ok) {
     throw new Error(`Apify start run failed ${runResp.status}: ${await runResp.text()}`);
   }
-  const runBody = await runResp.json() as { data: ApifyRunData };
+  const runBody = await parseJsonResponse<{ data?: Partial<ApifyRunData> }>(runResp, "Apify start run");
+  if (!runBody.data?.id || !runBody.data?.defaultDatasetId) {
+    throw new Error(`Apify start run: response missing run id or dataset id: ${JSON.stringify(runBody)}`);
+  }
   const { id: runId, defaultDatasetId: datasetId } = runBody.data;
 
   // Poll until SUCCEEDED or terminal status
@@ -274,7 +291,13 @@ export async function runApifyTranscriptScraper(
       }
       continue; // 5xx or network transient — keep polling
     }
-    const statusBody = await statusResp.json() as { data: ApifyRunData };
+    let statusBody: { data?: Partial<ApifyRunData> };
+    try {
+      statusBody = await parseJsonResponse<{ data?: Partial<ApifyRunData> }>(statusResp, "Apify poll");
+    } catch {
+      continue; // malformed body on an otherwise-ok poll response — as transient as a 5xx
+    }
+    if (!statusBody.data?.status) continue; // unexpected shape — same treatment
     lastStatus = statusBody.data.status;
     if (lastStatus === "SUCCEEDED") break;
     if (["FAILED", "ABORTED", "TIMED-OUT"].includes(lastStatus)) {
@@ -295,7 +318,11 @@ export async function runApifyTranscriptScraper(
     "Apify dataset fetch",
   );
   if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}: ${await itemsResp.text()}`);
-  return await itemsResp.json() as unknown[];
+  const items = await parseJsonResponse<unknown>(itemsResp, "Apify dataset fetch");
+  if (!Array.isArray(items)) {
+    throw new Error(`Apify dataset fetch: expected an array of items, got ${typeof items}`);
+  }
+  return items;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -459,7 +486,7 @@ ${truncated}`;
         throw new Error(`Gemini API error ${resp.status}: ${await resp.text()}`);
       }
 
-      const body = await resp.json() as GeminiResponse;
+      const body = await parseJsonResponse<GeminiResponse>(resp, "Gemini API");
       const text = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
       let parsed: { theme?: string; entities?: string[]; tags?: string[] } = {};
       try {

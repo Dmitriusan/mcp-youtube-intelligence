@@ -663,6 +663,19 @@ describe("getRecentVideoIds", () => {
     );
   });
 
+  it("throws a descriptive error instead of a raw SyntaxError when the ok response body is not valid JSON", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(getRecentVideoIds("PLtest1234", 3, "test-key")).rejects.toThrow(
+      /YouTube playlistItems API: response was not valid JSON \(status 200\)/,
+    );
+  });
+
   it("skips playlist items with missing contentDetails without throwing", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: true,
@@ -824,6 +837,97 @@ describe("runApifyTranscriptScraper (terminal statuses)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
+  it("continues polling when an ok poll response body is not valid JSON", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-badjson", defaultDatasetId: "ds-badjson", status: "RUNNING" },
+      }),
+    });
+
+    // First poll → 200 but an unparseable body (e.g. a proxy error page) — as transient as a 5xx
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); },
+    });
+
+    // Second poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-badjson", defaultDatasetId: "ds-badjson", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: "content" }] }],
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result).toHaveLength(1);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("continues polling when an ok poll response is missing the expected data.status shape", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-badshape", defaultDatasetId: "ds-badshape", status: "RUNNING" },
+      }),
+    });
+
+    // First poll → valid JSON, but not the expected { data: { status } } shape
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ unexpected: "shape" }),
+    });
+
+    // Second poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-badshape", defaultDatasetId: "ds-badshape", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: "content" }] }],
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result).toHaveLength(1);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
   it.each(["ABORTED", "TIMED-OUT"] as const)(
     "throws when Apify run ends with %s status",
     async (terminalStatus) => {
@@ -962,6 +1066,19 @@ describe("resolveChannel", () => {
 
     await expect(resolveChannel("@testchannel", "bad-api-key")).rejects.toThrow(
       /API key is invalid/,
+    );
+  });
+
+  it("throws a descriptive error instead of a raw SyntaxError when the ok response body is not valid JSON", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      /YouTube channels API: response was not valid JSON \(status 200\)/,
     );
   });
 
@@ -1292,6 +1409,22 @@ describe("runApifyTranscriptScraper (start-run failure)", () => {
     // Should not attempt to poll — only one fetch call
     expect(mockFetch).toHaveBeenCalledOnce();
   });
+
+  it("throws a descriptive error when the start-run response is ok but missing the run id / dataset id", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { status: "RUNNING" } }), // missing id and defaultDatasetId
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      runApifyTranscriptScraper(["https://www.youtube.com/watch?v=test123"], "test-token"),
+    ).rejects.toThrow(/Apify start run: response missing run id or dataset id/);
+
+    // Should not attempt to poll with an undefined run id
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
 });
 
 describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
@@ -1335,6 +1468,46 @@ describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
     );
     const failExpectation = expect(resultPromise).rejects.toThrow(
       /Apify dataset fetch failed 500: Internal error retrieving dataset/,
+    );
+    await vi.runAllTimersAsync();
+    await failExpectation;
+  });
+
+  it("throws a descriptive error when the dataset fetch response is valid JSON but not an array", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-shape", defaultDatasetId: "ds-shape", status: "RUNNING" },
+      }),
+    });
+
+    // Poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-shape", defaultDatasetId: "ds-shape", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch → 200 but body is an object, not the expected array of items
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ error: "dataset not found" }),
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    const failExpectation = expect(resultPromise).rejects.toThrow(
+      /Apify dataset fetch: expected an array of items, got object/,
     );
     await vi.runAllTimersAsync();
     await failExpectation;
