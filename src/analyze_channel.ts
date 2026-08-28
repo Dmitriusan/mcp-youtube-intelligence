@@ -231,6 +231,11 @@ export async function getRecentVideoIds(
   const resp = await fetchWithTimeout(apiUrl, {}, "YouTube playlistItems API");
   if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}: ${await resp.text()}`);
   const data = await parseJsonResponse<YtApiResponse>(resp, "YouTube playlistItems API");
+  // Google APIs usually mirror an API-level error into the HTTP status, but not
+  // always (e.g. some quota/permission failures land in the body of a 200) —
+  // resolveChannel already guards this; mirror it here instead of silently
+  // proceeding as if the channel simply had zero videos.
+  if (data.error) throw new Error(`YouTube API: ${data.error.message}`);
   const items = (data.items ?? []) as Array<{ contentDetails?: { videoId?: string } }>;
   return items.map((item) => item.contentDetails?.videoId).filter((id): id is string => Boolean(id));
 }
