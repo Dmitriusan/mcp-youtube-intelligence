@@ -480,8 +480,10 @@ ${truncated}`;
         "Gemini API",
       );
 
-      // Retry once on transient server errors (Gemini 503 overloaded is common)
-      if (!resp.ok && resp.status >= 500) {
+      // Retry once on transient failures: 5xx (Gemini 503 overloaded is common) or 429
+      // (rate limit) — both are worth a single backoff-free retry rather than discarding
+      // this video's topics outright.
+      if (!resp.ok && (resp.status >= 500 || resp.status === 429)) {
         resp = await fetchWithTimeout(
           `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
           {

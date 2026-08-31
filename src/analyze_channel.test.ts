@@ -550,11 +550,11 @@ describe("extractTopicsWithLLM", () => {
     expect(sentPrompt).not.toContain("word1000");
   });
 
-  it("throws when Gemini returns a non-ok HTTP status", async () => {
+  it("throws when Gemini returns a non-ok, non-retryable HTTP status", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: false,
-      status: 429,
-      text: async () => "Rate limit exceeded",
+      status: 401,
+      text: async () => "Invalid API key",
     });
     vi.stubGlobal("fetch", mockFetch);
 
@@ -565,7 +565,9 @@ describe("extractTopicsWithLLM", () => {
       },
     ];
 
-    await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 429/);
+    await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 401/);
+    // 401 is not retried — bad credentials won't fix themselves on a second attempt
+    expect(mockFetch).toHaveBeenCalledOnce();
   });
 
   it("skips video with malformed JSON response and continues processing remaining videos", async () => {
@@ -1545,9 +1547,9 @@ describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// extractTopicsWithLLM — Gemini 5xx retry
+// extractTopicsWithLLM — Gemini transient-error retry (5xx, 429)
 // ---------------------------------------------------------------------------
-describe("extractTopicsWithLLM (5xx retry)", () => {
+describe("extractTopicsWithLLM (transient-error retry)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -1609,7 +1611,7 @@ describe("extractTopicsWithLLM (5xx retry)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it("does not retry on 4xx client errors", async () => {
+  it("does not retry on 4xx client errors other than 429", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: false,
       status: 400,
@@ -1626,6 +1628,63 @@ describe("extractTopicsWithLLM (5xx retry)", () => {
 
     await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 400/);
     expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
+  it("retries once on 429 rate limit and returns result when the retry succeeds", async () => {
+    const mockFetch = vi.fn()
+      // First call → 429 rate limited
+      .mockResolvedValueOnce({ ok: false, status: 429, text: async () => "Rate limit exceeded" })
+      // Retry → 200 OK
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      theme: "Cloud infrastructure scaling",
+                      entities: ["Kubernetes"],
+                      tags: ["cloud", "devops"],
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid001" },
+        transcript: [{ text: "kubernetes cloud infrastructure scaling devops" }],
+      },
+    ];
+
+    const result = await extractTopicsWithLLM(items, "test-key");
+    expect(result).toHaveLength(1);
+    expect(result[0].theme).toBe("Cloud infrastructure scaling");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws after retry when both 429 attempts are rate limited", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 429, text: async () => "Rate limit exceeded" })
+      .mockResolvedValueOnce({ ok: false, status: 429, text: async () => "Still rate limited" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      {
+        videoDetails: { videoId: "vid001" },
+        transcript: [{ text: "some content here" }],
+      },
+    ];
+
+    await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(/Gemini API error 429/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });
 
