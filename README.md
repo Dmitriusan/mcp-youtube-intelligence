@@ -61,7 +61,7 @@ Add to your Claude Desktop / MCP client config:
 
 ```
 channel_url: YouTube channel URL or @handle (e.g. @fireship, youtube.com/@fireship)
-max_videos:  Number of recent videos to analyze (default: 5)
+max_videos:  Number of recent videos to analyze (default: 5, max: 50)
 ```
 
 **Example prompt:** "Analyze the @fireship YouTube channel and tell me what topics they cover most."
