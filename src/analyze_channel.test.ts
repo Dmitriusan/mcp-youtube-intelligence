@@ -1145,6 +1145,23 @@ describe("resolveChannel", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
+  it("throws the API error message when the search fallback returns 200 but the body carries an error object", async () => {
+    // Mirrors resolveChannel's own handle/channel_id guard and getRecentVideoIds: not every
+    // API-level failure lands in the HTTP status, and the search endpoint (100 quota units)
+    // is the most likely of the three call sites to hit this.
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ error: { message: "quotaExceeded" } }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      resolveChannel("https://www.youtube.com/c/fireship", "test-api-key"),
+    ).rejects.toThrow(/YouTube API: quotaExceeded/);
+    // Must not misreport a real API-level failure as "Channel not found"
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("throws on non-ok HTTP response from the search API custom_url fallback", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: false,

@@ -186,6 +186,12 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
     const searchResp = await fetchWithTimeout(searchUrl, {}, "YouTube search API");
     if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}: ${await searchResp.text()}`);
     const searchData = await parseJsonResponse<YtApiResponse>(searchResp, "YouTube search API");
+    // Same guard as the handle/channel_id path below and getRecentVideoIds: Google APIs
+    // sometimes embed a quota/permission failure in a 200 body instead of the HTTP status.
+    // This path costs 100 quota units per call (vs 1 for the others), so it is the most
+    // likely of the three to actually hit that failure mode — without this check it was
+    // misreported as "Channel not found" instead of the real cause.
+    if (searchData.error) throw new Error(`YouTube API: ${searchData.error.message}`);
     const items = searchData.items ?? [];
     if (!items.length) throw new Error(`Channel not found for custom URL: ${input}`);
     const channelId = (items[0]["id"] as Record<string, string> | undefined)?.["channelId"];
