@@ -191,6 +191,28 @@ describe("extractTopics", () => {
     expect(topics).toContain("javascript");
     expect(topics).toContain("typescript");
   });
+
+  it("does not leak negation-contraction fragments as topics", () => {
+    // The word regex splits on the apostrophe, so "wasn't" tokenizes as "wasn" —
+    // 4+ chars, long enough to dodge the length filter, and not a plain modal verb
+    // already in STOPWORDS. Real spoken transcripts are dense with these.
+    const items = [
+      {
+        transcript: [
+          {
+            text:
+              "it wasn't ready and we weren't sure, it hasn't shipped, we haven't tested it, " +
+              "he hadn't reviewed it, it doesn't work, we didn't expect that, they aren't here, " +
+              "we couldn't verify it, it wouldn't build, and it shouldn't have happened",
+          },
+        ],
+      },
+    ];
+    const topics = extractTopics(items, 20);
+    for (const fragment of ["wasn", "weren", "hasn", "haven", "hadn", "doesn", "didn", "aren", "couldn", "wouldn", "shouldn"]) {
+      expect(topics).not.toContain(fragment);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

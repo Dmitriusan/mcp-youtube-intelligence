@@ -392,6 +392,15 @@ const STOPWORDS = new Set([
   "let","say","said","gonna","wanna","gotta",
 ]);
 
+// The word regex below splits on the apostrophe in negation contractions (e.g.
+// "wasn't" tokenizes as "wasn", dropping the "t"), and several of those prefixes
+// are 4+ characters — long enough to pass the length filter — and were not caught
+// by the modal-verb stopwords above, so they leaked into topics as noise on any
+// transcript with normal spoken-English contraction density.
+const CONTRACTION_STOPWORDS = new Set([
+  "wasn","aren","weren","hasn","haven","hadn","doesn","didn","couldn","wouldn","shouldn",
+]);
+
 // Short technical abbreviations exempt from the 4-char minimum in extractTopics.
 // The base regex only matches [a-z]{4,} to suppress noise, but these 2-3 char
 // terms are high-signal in tech content (channels discussing AI, web dev, cloud, etc.).
@@ -555,7 +564,7 @@ export function extractTopics(transcriptItems: unknown[], topN = 20): string[] {
 
     const words = text.toLowerCase().match(/\b[a-z]{2,}\b/g) ?? [];
     for (const word of words) {
-      if ((word.length >= 4 || TECH_TERMS.has(word)) && !STOPWORDS.has(word)) {
+      if ((word.length >= 4 || TECH_TERMS.has(word)) && !STOPWORDS.has(word) && !CONTRACTION_STOPWORDS.has(word)) {
         freq[word] = (freq[word] ?? 0) + 1;
       }
     }
