@@ -1,6 +1,6 @@
 {
   "name": "mcp-youtube-intelligence",
-  "version": "0.1.14",
+  "version": "0.2.0",
   "description": "MCP server for extracting structured intelligence from YouTube channels and videos — transcripts, topics, competitive signals",
   "mcpName": "io.github.dmitriusan/mcp-youtube-intelligence",
   "main": "build/index.js",
@@ -40,7 +40,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Dmitriusan/mcp-youtube-intelligence"
+    "url": "git+https://github.com/Dmitriusan/mcp-youtube-intelligence.git"
   },
   "homepage": "https://github.com/Dmitriusan/mcp-youtube-intelligence#readme",
   "engines": {
