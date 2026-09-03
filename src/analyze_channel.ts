@@ -261,15 +261,23 @@ export async function runApifyTranscriptScraper(
   token: string,
 ): Promise<unknown[]> {
   // Start actor run — 1GB memory is enough for a few videos
-  const runResp = await fetchWithTimeout(
-    `${APIFY_BASE}/acts/${TRANSCRIPT_ACTOR_ID}/runs?memory=1024&timeout=300`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ urls: videoUrls.map((url) => ({ url })) }),
-    },
-    "Apify start run",
-  );
+  const startRun = () =>
+    fetchWithTimeout(
+      `${APIFY_BASE}/acts/${TRANSCRIPT_ACTOR_ID}/runs?memory=1024&timeout=300`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ urls: videoUrls.map((url) => ({ url })) }),
+      },
+      "Apify start run",
+    );
+  let runResp = await startRun();
+  // Retry once on a transient 5xx — the same one-shot tolerance already given to
+  // Gemini calls and to every status poll below; a 503 here previously failed the
+  // whole tool call immediately instead of getting that same retry.
+  if (!runResp.ok && runResp.status >= 500) {
+    runResp = await startRun();
+  }
   if (!runResp.ok) {
     throw new Error(`Apify start run failed ${runResp.status}: ${await runResp.text()}`);
   }

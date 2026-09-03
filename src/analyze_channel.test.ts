@@ -1446,6 +1446,7 @@ describe("analyzeChannel (empty playlist)", () => {
 describe("runApifyTranscriptScraper (start-run failure)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it("throws immediately when the Apify start-run request returns a non-ok status", async () => {
@@ -1478,6 +1479,48 @@ describe("runApifyTranscriptScraper (start-run failure)", () => {
 
     // Should not attempt to poll with an undefined run id
     expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
+  it("retries once on a transient 5xx and proceeds when the retry succeeds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run attempt 1 → 503 Overloaded
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" });
+    // Start run attempt 2 (retry) → ok
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-retry", defaultDatasetId: "ds-retry", status: "RUNNING" } }),
+    });
+    // Poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-retry", defaultDatasetId: "ds-retry", status: "SUCCEEDED" } }),
+    });
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [{ transcript: "hello" }] });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(["https://www.youtube.com/watch?v=test123"], "test-token");
+    await vi.runAllTimersAsync();
+    const items = await resultPromise;
+
+    expect(items).toEqual([{ transcript: "hello" }]);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws after retry when both start-run attempts return a 5xx", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" })
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Still overloaded" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      runApifyTranscriptScraper(["https://www.youtube.com/watch?v=test123"], "test-token"),
+    ).rejects.toThrow(/Apify start run failed 503: Still overloaded/);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });
 
