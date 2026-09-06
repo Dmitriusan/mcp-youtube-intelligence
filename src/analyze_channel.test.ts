@@ -1798,6 +1798,61 @@ describe("extractTopicsWithLLM (transient-error retry)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// extractTopicsWithLLM — auth failures (401/403) abort remaining videos instead
+// of repeating the same doomed call once per video
+// ---------------------------------------------------------------------------
+describe("extractTopicsWithLLM (auth failure short-circuit)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("stops attempting further videos after a 401 and keeps results already collected", async () => {
+    const mockFetch = vi.fn()
+      // vid001 — succeeds
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: JSON.stringify({ theme: "First video", entities: [], tags: [] }) }] } }],
+        }),
+      })
+      // vid002 — invalid API key, not retried
+      .mockResolvedValueOnce({ ok: false, status: 401, text: async () => "Invalid API key" });
+      // vid003 must never be called — no third mock provided
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "first video content" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [{ text: "second video content" }] },
+      { videoDetails: { videoId: "vid003" }, transcript: [{ text: "third video content" }] },
+    ];
+
+    const result = await extractTopicsWithLLM(items, "bad-key");
+    expect(result).toEqual([{ video_id: "vid001", theme: "First video", entities: [], tags: [] }]);
+    // Exactly 2 calls — vid003 is never attempted once the key is known to be bad
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws the auth error when every video fails with a 403", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: async () => "Permission denied",
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "some content" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [{ text: "more content" }] },
+    ];
+
+    await expect(extractTopicsWithLLM(items, "bad-key")).rejects.toThrow(/Gemini API error 403: Permission denied/);
+    // vid002 is never attempted — the first 403 already establishes the key is bad
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // analyzeChannel — Gemini graceful degradation when key is set but API fails
 // ---------------------------------------------------------------------------
 describe("analyzeChannel (Gemini degradation with key set)", () => {

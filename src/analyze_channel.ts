@@ -524,7 +524,16 @@ ${truncated}`;
       }
 
       if (!resp.ok) {
-        throw new Error(`Gemini API error ${resp.status}: ${await resp.text()}`);
+        const detail = await resp.text();
+        if (resp.status === 401 || resp.status === 403) {
+          // Auth failures are invariant across requests using the same key — every
+          // remaining video would fail identically, so stop instead of repeating a
+          // doomed call up to max_videos times.
+          lastRequestError = `Gemini API error ${resp.status}: ${detail}`;
+          console.warn(`[analyze_channel] Gemini authentication failed (${resp.status}), aborting remaining videos: ${lastRequestError}`);
+          break;
+        }
+        throw new Error(`Gemini API error ${resp.status}: ${detail}`);
       }
 
       const body = await parseJsonResponse<GeminiResponse>(resp, "Gemini API");
