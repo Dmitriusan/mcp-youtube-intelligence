@@ -1522,6 +1522,50 @@ describe("runApifyTranscriptScraper (start-run failure)", () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
+
+  it("retries once when the start-run request rejects with a network error, and proceeds when the retry succeeds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run attempt 1 → connection reset (fetch itself rejects, not an HTTP error response)
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET"));
+    // Start run attempt 2 (retry) → ok
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-neterr", defaultDatasetId: "ds-neterr", status: "RUNNING" } }),
+    });
+    // Poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-neterr", defaultDatasetId: "ds-neterr", status: "SUCCEEDED" } }),
+    });
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [{ transcript: "hello" }] });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(["https://www.youtube.com/watch?v=test123"], "test-token");
+    await vi.runAllTimersAsync();
+    const items = await resultPromise;
+
+    expect(items).toEqual([{ transcript: "hello" }]);
+    // 4 calls total: start run (rejects), start run retry (ok), poll, dataset fetch
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws the underlying error when both start-run attempts reject with a network error", async () => {
+    const mockFetch = vi.fn()
+      .mockRejectedValueOnce(new Error("ECONNRESET"))
+      .mockRejectedValueOnce(new Error("ECONNRESET again"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      runApifyTranscriptScraper(["https://www.youtube.com/watch?v=test123"], "test-token"),
+    ).rejects.toThrow(/ECONNRESET again/);
+
+    // Exactly 2 attempts — the retry is one-shot, same bound as the 5xx path above
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("runApifyTranscriptScraper (dataset fetch failure)", () => {

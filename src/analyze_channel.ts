@@ -271,11 +271,22 @@ export async function runApifyTranscriptScraper(
       },
       "Apify start run",
     );
-  let runResp = await startRun();
-  // Retry once on a transient 5xx — the same one-shot tolerance already given to
-  // Gemini calls and to every status poll below; a 503 here previously failed the
-  // whole tool call immediately instead of getting that same retry.
-  if (!runResp.ok && runResp.status >= 500) {
+  // A rejected promise (connection reset, DNS blip) is exactly as transient as a
+  // 5xx response — every status poll below already treats the two identically —
+  // but this initial call let a rejection escape uncaught, failing the whole tool
+  // call immediately instead of getting the same one-shot retry.
+  let runResp: Response | undefined;
+  try {
+    runResp = await startRun();
+  } catch {
+    runResp = undefined;
+  }
+  if (runResp === undefined) {
+    runResp = await startRun();
+  } else if (!runResp.ok && runResp.status >= 500) {
+    // Retry once on a transient 5xx — the same one-shot tolerance given above to a
+    // thrown network error; a 503 here previously failed the whole tool call
+    // immediately instead of getting that same retry.
     runResp = await startRun();
   }
   if (!runResp.ok) {
