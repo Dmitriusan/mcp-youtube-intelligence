@@ -199,7 +199,22 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
     return resolveChannel(channelId, apiKey);
   }
 
-  const resp = await fetchWithTimeout(apiUrl, {}, "YouTube channels API");
+  // Same one-shot tolerance given to the Apify calls below: a thrown rejection
+  // (connection reset, DNS blip) is as transient as a 5xx. This is the first
+  // external call every analyze_channel run makes, and previously it had no
+  // tolerance at all — a single blip failed the whole tool call immediately.
+  const fetchChannel = () => fetchWithTimeout(apiUrl, {}, "YouTube channels API");
+  let resp: Response | undefined;
+  try {
+    resp = await fetchChannel();
+  } catch {
+    resp = undefined;
+  }
+  if (resp === undefined) {
+    resp = await fetchChannel();
+  } else if (!resp.ok && resp.status >= 500) {
+    resp = await fetchChannel();
+  }
   if (!resp.ok) throw new Error(`YouTube channels API error ${resp.status}: ${await resp.text()}`);
   const data = await parseJsonResponse<YtApiResponse>(resp, "YouTube channels API");
 

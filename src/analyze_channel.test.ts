@@ -1094,6 +1094,72 @@ describe("resolveChannel", () => {
     );
   });
 
+  it("retries once on a transient 5xx from the channels API and proceeds when the retry succeeds", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCretry0000000000000001",
+            snippet: { title: "Retry Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUretry0000000000000001" } },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await resolveChannel("@testchannel", "test-api-key");
+    expect(result.channelId).toBe("UCretry0000000000000001");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws after retry when both channels API attempts return a 5xx", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" })
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Still overloaded" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      /YouTube channels API error 503: Still overloaded/,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries once when the channels API request rejects with a network error, and proceeds when the retry succeeds", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET"));
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCneterr000000000000001",
+            snippet: { title: "Net Error Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUneterr000000000000001" } },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await resolveChannel("@testchannel", "test-api-key");
+    expect(result.channelId).toBe("UCneterr000000000000001");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws the underlying error when both channels API attempts reject with a network error", async () => {
+    const mockFetch = vi.fn()
+      .mockRejectedValueOnce(new Error("ECONNRESET"))
+      .mockRejectedValueOnce(new Error("ECONNRESET again"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(/ECONNRESET again/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
   it("throws when API body contains error object", async () => {
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: true,
