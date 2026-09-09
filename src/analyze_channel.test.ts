@@ -1574,7 +1574,7 @@ describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
     vi.useRealTimers();
   });
 
-  it("throws with response body when the dataset items fetch returns a non-ok status", async () => {
+  it("throws immediately when the dataset fetch returns a non-retryable status", async () => {
     vi.useFakeTimers();
     const mockFetch = vi.fn();
 
@@ -1582,7 +1582,7 @@ describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        data: { id: "run-ds-fail", defaultDatasetId: "ds-fail", status: "RUNNING" },
+        data: { id: "run-ds-401", defaultDatasetId: "ds-401", status: "RUNNING" },
       }),
     });
 
@@ -1590,15 +1590,15 @@ describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        data: { id: "run-ds-fail", defaultDatasetId: "ds-fail", status: "SUCCEEDED" },
+        data: { id: "run-ds-401", defaultDatasetId: "ds-401", status: "SUCCEEDED" },
       }),
     });
 
-    // Dataset fetch → 500
+    // Dataset fetch → 401 (not transient — should not retry)
     mockFetch.mockResolvedValueOnce({
       ok: false,
-      status: 500,
-      text: async () => "Internal error retrieving dataset",
+      status: 401,
+      text: async () => "Unauthorized",
     });
 
     vi.stubGlobal("fetch", mockFetch);
@@ -1608,10 +1608,161 @@ describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
       "test-token",
     );
     const failExpectation = expect(resultPromise).rejects.toThrow(
-      /Apify dataset fetch failed 500: Internal error retrieving dataset/,
+      /Apify dataset fetch failed 401: Unauthorized/,
     );
     await vi.runAllTimersAsync();
     await failExpectation;
+
+    // No retry on a non-5xx status — 3 calls total: start run, poll, dataset fetch
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries once on a transient 5xx dataset fetch and proceeds when the retry succeeds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-retry", defaultDatasetId: "ds-retry", status: "RUNNING" },
+      }),
+    });
+
+    // Poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-retry", defaultDatasetId: "ds-retry", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch attempt 1 → 503 Overloaded
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" });
+    // Dataset fetch attempt 2 (retry) → ok
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [{ transcript: "hello" }] });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const items = await resultPromise;
+
+    expect(items).toEqual([{ transcript: "hello" }]);
+    // 4 calls total: start run, poll, dataset fetch (503), dataset fetch retry (ok)
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws after retry when both dataset fetch attempts return a 5xx", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-fail", defaultDatasetId: "ds-fail", status: "RUNNING" },
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-fail", defaultDatasetId: "ds-fail", status: "SUCCEEDED" },
+      }),
+    });
+    // Dataset fetch attempt 1 → 500, attempt 2 (retry) → 500
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => "Internal error retrieving dataset",
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => "Still failing",
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    const failExpectation = expect(resultPromise).rejects.toThrow(
+      /Apify dataset fetch failed 500: Still failing/,
+    );
+    await vi.runAllTimersAsync();
+    await failExpectation;
+
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries once when the dataset fetch rejects with a network error, and proceeds when the retry succeeds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-neterr", defaultDatasetId: "ds-neterr", status: "RUNNING" },
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-neterr", defaultDatasetId: "ds-neterr", status: "SUCCEEDED" },
+      }),
+    });
+    // Dataset fetch attempt 1 → connection reset (fetch itself rejects)
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET"));
+    // Dataset fetch attempt 2 (retry) → ok
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [{ transcript: "hello" }] });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const items = await resultPromise;
+
+    expect(items).toEqual([{ transcript: "hello" }]);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws the underlying error when both dataset fetch attempts reject with a network error", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-neterr2", defaultDatasetId: "ds-neterr2", status: "RUNNING" },
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-neterr2", defaultDatasetId: "ds-neterr2", status: "SUCCEEDED" },
+      }),
+    });
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET"));
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET again"));
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    const failExpectation = expect(resultPromise).rejects.toThrow(/ECONNRESET again/);
+    await vi.runAllTimersAsync();
+    await failExpectation;
+
+    expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
   it("throws a descriptive error when the dataset fetch response is valid JSON but not an array", async () => {

@@ -341,12 +341,27 @@ export async function runApifyTranscriptScraper(
     );
   }
 
-  // Fetch dataset items
-  const itemsResp = await fetchWithTimeout(
-    `${APIFY_BASE}/datasets/${datasetId}/items?limit=100`,
-    { headers: { Authorization: `Bearer ${token}` } },
-    "Apify dataset fetch",
-  );
+  // Fetch dataset items — same one-shot tolerance as the start-run call above: a
+  // thrown rejection (connection reset, DNS blip) is as transient as a 5xx, and
+  // this call previously had neither, failing the whole run on a blip after the
+  // actor had already finished successfully.
+  const fetchItems = () =>
+    fetchWithTimeout(
+      `${APIFY_BASE}/datasets/${datasetId}/items?limit=100`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      "Apify dataset fetch",
+    );
+  let itemsResp: Response | undefined;
+  try {
+    itemsResp = await fetchItems();
+  } catch {
+    itemsResp = undefined;
+  }
+  if (itemsResp === undefined) {
+    itemsResp = await fetchItems();
+  } else if (!itemsResp.ok && itemsResp.status >= 500) {
+    itemsResp = await fetchItems();
+  }
   if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}: ${await itemsResp.text()}`);
   const items = await parseJsonResponse<unknown>(itemsResp, "Apify dataset fetch");
   if (!Array.isArray(items)) {
