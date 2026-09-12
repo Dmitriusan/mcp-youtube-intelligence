@@ -1353,6 +1353,82 @@ describe("resolveChannel", () => {
       resolveChannel("https://www.youtube.com/user/unknownuser", "test-api-key"),
     ).rejects.toThrow(/Channel not found for custom URL/);
   });
+
+  it("retries once on a transient 5xx from the search API custom_url fallback and proceeds when the retry succeeds", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [{ id: { channelId: "UCVHVAPyVgjkAyfLiwbHyXyg" } }] }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCVHVAPyVgjkAyfLiwbHyXyg",
+            snippet: { title: "Fireship" },
+            contentDetails: { relatedPlaylists: { uploads: "UUVHVAPyVgjkAyfLiwbHyXyg" } },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await resolveChannel("https://www.youtube.com/c/fireship", "test-api-key");
+    expect(result.channelId).toBe("UCVHVAPyVgjkAyfLiwbHyXyg");
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("throws after retry when both search API custom_url fallback attempts return a 5xx", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" })
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Still overloaded" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      resolveChannel("https://www.youtube.com/c/fireship", "test-api-key"),
+    ).rejects.toThrow(/YouTube search API error 503: Still overloaded/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries once when the search API custom_url fallback request rejects with a network error, and proceeds when the retry succeeds", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET"));
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [{ id: { channelId: "UCVHVAPyVgjkAyfLiwbHyXyg" } }] }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCVHVAPyVgjkAyfLiwbHyXyg",
+            snippet: { title: "Fireship" },
+            contentDetails: { relatedPlaylists: { uploads: "UUVHVAPyVgjkAyfLiwbHyXyg" } },
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await resolveChannel("https://www.youtube.com/c/fireship", "test-api-key");
+    expect(result.channelId).toBe("UCVHVAPyVgjkAyfLiwbHyXyg");
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("throws the underlying error when both search API custom_url fallback attempts reject with a network error", async () => {
+    const mockFetch = vi.fn()
+      .mockRejectedValueOnce(new Error("ECONNRESET"))
+      .mockRejectedValueOnce(new Error("ECONNRESET again"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      resolveChannel("https://www.youtube.com/c/fireship", "test-api-key"),
+    ).rejects.toThrow(/ECONNRESET again/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

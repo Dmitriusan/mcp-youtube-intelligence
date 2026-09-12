@@ -183,7 +183,21 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
   } else {
     // custom_url — fall back to search (costs 100 quota units); rare path
     const searchUrl = `${YT_API_BASE}/search?part=snippet&type=channel&q=${encodeURIComponent(parsed.value)}&maxResults=1&key=${apiKey}`;
-    const searchResp = await fetchWithTimeout(searchUrl, {}, "YouTube search API");
+    // Same one-shot tolerance as the channels-API lookup below: a thrown rejection
+    // is as transient as a 5xx, and this path previously had neither — leaving the
+    // most quota-expensive of the three call sites the least tolerant of a blip.
+    const fetchSearch = () => fetchWithTimeout(searchUrl, {}, "YouTube search API");
+    let searchResp: Response | undefined;
+    try {
+      searchResp = await fetchSearch();
+    } catch {
+      searchResp = undefined;
+    }
+    if (searchResp === undefined) {
+      searchResp = await fetchSearch();
+    } else if (!searchResp.ok && searchResp.status >= 500) {
+      searchResp = await fetchSearch();
+    }
     if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}: ${await searchResp.text()}`);
     const searchData = await parseJsonResponse<YtApiResponse>(searchResp, "YouTube search API");
     // Same guard as the handle/channel_id path below and getRecentVideoIds: Google APIs
