@@ -773,6 +773,56 @@ describe("getRecentVideoIds", () => {
     const result = await getRecentVideoIds("PLtest1234", 3, "test-key");
     expect(result).toEqual(["vid001", "vid003"]);
   });
+
+  it("retries once on a transient 5xx from the playlistItems API and proceeds when the retry succeeds", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [{ contentDetails: { videoId: "vid001" } }] }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await getRecentVideoIds("PLtest1234", 3, "test-key");
+    expect(result).toEqual(["vid001"]);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws after retry when both playlistItems API attempts return a 5xx", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" })
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Still overloaded" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(getRecentVideoIds("PLtest1234", 3, "test-key")).rejects.toThrow(
+      /playlistItems API error 503: Still overloaded/,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries once when the playlistItems API request rejects with a network error, and proceeds when the retry succeeds", async () => {
+    const mockFetch = vi.fn();
+    mockFetch.mockRejectedValueOnce(new Error("ECONNRESET"));
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [{ contentDetails: { videoId: "vid001" } }] }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await getRecentVideoIds("PLtest1234", 3, "test-key");
+    expect(result).toEqual(["vid001"]);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws the underlying error when both playlistItems API attempts reject with a network error", async () => {
+    const mockFetch = vi.fn()
+      .mockRejectedValueOnce(new Error("ECONNRESET"))
+      .mockRejectedValueOnce(new Error("ECONNRESET again"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(getRecentVideoIds("PLtest1234", 3, "test-key")).rejects.toThrow(/ECONNRESET again/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

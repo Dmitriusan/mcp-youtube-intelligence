@@ -249,7 +249,23 @@ export async function getRecentVideoIds(
     `&playlistId=${encodeURIComponent(uploadsPlaylistId)}` +
     `&maxResults=${maxResults}` +
     `&key=${apiKey}`;
-  const resp = await fetchWithTimeout(apiUrl, {}, "YouTube playlistItems API");
+  // Same one-shot tolerance as resolveChannel's channels-API lookup and the Apify
+  // calls: a thrown rejection (connection reset, DNS blip) is as transient as a
+  // 5xx. This is the second external call every analyze_channel run makes, and
+  // previously it had no tolerance at all — a single blip failed the whole tool
+  // call immediately.
+  const fetchPlaylistItems = () => fetchWithTimeout(apiUrl, {}, "YouTube playlistItems API");
+  let resp: Response | undefined;
+  try {
+    resp = await fetchPlaylistItems();
+  } catch {
+    resp = undefined;
+  }
+  if (resp === undefined) {
+    resp = await fetchPlaylistItems();
+  } else if (!resp.ok && resp.status >= 500) {
+    resp = await fetchPlaylistItems();
+  }
   if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}: ${await resp.text()}`);
   const data = await parseJsonResponse<YtApiResponse>(resp, "YouTube playlistItems API");
   // Google APIs usually mirror an API-level error into the HTTP status, but not
