@@ -60,7 +60,12 @@ Add to your Claude Desktop / MCP client config:
 **`analyze_channel`** — Extract intelligence from a YouTube channel
 
 ```
-channel_url: YouTube channel URL or @handle (e.g. @fireship, youtube.com/@fireship)
+channel_url: YouTube channel URL or @handle. Accepts:
+               - @handle (e.g. @fireship)
+               - full URL with handle (e.g. youtube.com/@fireship)
+               - /channel/UC... URL
+               - bare 24-character UC... channel ID
+               - legacy /c/name or /user/name URL
 max_videos:  Number of recent videos to analyze (default: 5, max: 50)
 ```
 
