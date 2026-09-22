@@ -17,6 +17,11 @@ import { analyzeChannel } from "./analyze_channel.js";
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require("../package.json") as { version: string };
 
+if (process.argv.includes("--version") || process.argv.includes("-v")) {
+  console.log(packageVersion);
+  process.exit(0);
+}
+
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(`mcp-youtube-intelligence v${packageVersion} — MCP server for YouTube channel intelligence
 
@@ -24,7 +29,8 @@ Usage:
   mcp-youtube-intelligence [options]
 
 Options:
-  --help, -h   Show this help message
+  --help, -h      Show this help message
+  --version, -v   Print the installed version
 
 Tools provided:
   analyze_channel   Extract transcripts, topics, and competitive signals from a YouTube channel`);
