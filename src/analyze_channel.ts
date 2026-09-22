@@ -328,10 +328,10 @@ export async function runApifyTranscriptScraper(
   }
   if (runResp === undefined) {
     runResp = await startRun();
-  } else if (!runResp.ok && runResp.status >= 500) {
-    // Retry once on a transient 5xx — the same one-shot tolerance given above to a
-    // thrown network error; a 503 here previously failed the whole tool call
-    // immediately instead of getting that same retry.
+  } else if (!runResp.ok && (runResp.status >= 500 || runResp.status === 429)) {
+    // Retry once on a transient 5xx, or a 429 — Apify returns 429 when the account's
+    // concurrent-actor-run limit is hit, which clears within seconds, unlike a bad
+    // token or malformed request. Same tolerance already given to Gemini below.
     runResp = await startRun();
   }
   if (!runResp.ok) {
@@ -360,11 +360,13 @@ export async function runApifyTranscriptScraper(
       continue;
     }
     if (!statusResp.ok) {
-      // 4xx = permanent error (invalid run ID, bad token) — fail fast instead of polling to timeout
-      if (statusResp.status >= 400 && statusResp.status < 500) {
+      // Most 4xx are permanent (invalid run ID, bad token) — fail fast instead of
+      // polling to timeout. 429 is the exception: Apify's own rate limit, which the
+      // next scheduled poll (APIFY_POLL_INTERVAL_MS later) already backs off past.
+      if (statusResp.status >= 400 && statusResp.status < 500 && statusResp.status !== 429) {
         throw new Error(`Apify poll error ${statusResp.status} for run ${runId}: ${await statusResp.text()}`);
       }
-      continue; // 5xx or network transient — keep polling
+      continue; // 5xx, 429, or network transient — keep polling
     }
     let statusBody: { data?: Partial<ApifyRunData> };
     try {
@@ -404,7 +406,7 @@ export async function runApifyTranscriptScraper(
   }
   if (itemsResp === undefined) {
     itemsResp = await fetchItems();
-  } else if (!itemsResp.ok && itemsResp.status >= 500) {
+  } else if (!itemsResp.ok && (itemsResp.status >= 500 || itemsResp.status === 429)) {
     itemsResp = await fetchItems();
   }
   if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}: ${await itemsResp.text()}`);

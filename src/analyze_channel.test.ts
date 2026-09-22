@@ -908,6 +908,49 @@ describe("runApifyTranscriptScraper (terminal statuses)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
+  it("continues polling when a 429 rate-limit response is received during status check", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run → RUNNING
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-429", defaultDatasetId: "ds-429", status: "RUNNING" },
+      }),
+    });
+
+    // First poll → 429 (account-wide Apify rate limit, not a permanent rejection)
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: async () => "Rate limit exceeded" });
+
+    // Second poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-429", defaultDatasetId: "ds-429", status: "SUCCEEDED" },
+      }),
+    });
+
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: "content" }] }],
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result).toHaveLength(1);
+    // 4 calls total: start run, poll (429), poll (SUCCEEDED), dataset fetch — not a fail-fast 4xx
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
   it("continues polling when a poll request rejects with a network error", async () => {
     vi.useFakeTimers();
     const mockFetch = vi.fn();
@@ -1729,6 +1772,35 @@ describe("runApifyTranscriptScraper (start-run failure)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
+  it("retries once on a 429 rate limit and proceeds when the retry succeeds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    // Start run attempt 1 → 429 (concurrent-actor-run limit hit)
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: async () => "Rate limit exceeded" });
+    // Start run attempt 2 (retry) → ok
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-429", defaultDatasetId: "ds-429", status: "RUNNING" } }),
+    });
+    // Poll → SUCCEEDED
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-429", defaultDatasetId: "ds-429", status: "SUCCEEDED" } }),
+    });
+    // Dataset fetch
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [{ transcript: "hello" }] });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(["https://www.youtube.com/watch?v=test123"], "test-token");
+    await vi.runAllTimersAsync();
+    const items = await resultPromise;
+
+    expect(items).toEqual([{ transcript: "hello" }]);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
   it("throws after retry when both start-run attempts return a 5xx", async () => {
     const mockFetch = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "Overloaded" })
@@ -1872,6 +1944,40 @@ describe("runApifyTranscriptScraper (dataset fetch failure)", () => {
 
     expect(items).toEqual([{ transcript: "hello" }]);
     // 4 calls total: start run, poll, dataset fetch (503), dataset fetch retry (ok)
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries once on a 429 rate-limited dataset fetch and proceeds when the retry succeeds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-429", defaultDatasetId: "ds-429", status: "RUNNING" },
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { id: "run-ds-429", defaultDatasetId: "ds-429", status: "SUCCEEDED" },
+      }),
+    });
+    // Dataset fetch attempt 1 → 429 rate limited
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: async () => "Rate limit exceeded" });
+    // Dataset fetch attempt 2 (retry) → ok
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [{ transcript: "hello" }] });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = runApifyTranscriptScraper(
+      ["https://www.youtube.com/watch?v=test123"],
+      "test-token",
+    );
+    await vi.runAllTimersAsync();
+    const items = await resultPromise;
+
+    expect(items).toEqual([{ transcript: "hello" }]);
     expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
