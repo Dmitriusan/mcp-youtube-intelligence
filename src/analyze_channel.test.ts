@@ -384,6 +384,7 @@ describe("analyzeChannel (input validation)", () => {
     delete process.env["APIFY_TOKEN"];
     delete process.env["YOUTUBE_API_KEY"];
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it("throws immediately when max_videos is 0", async () => {
@@ -392,6 +393,58 @@ describe("analyzeChannel (input validation)", () => {
 
   it("throws immediately when max_videos is negative", async () => {
     await expect(analyzeChannel("@fireship", -5)).rejects.toThrow(/max_videos must be at least 1/);
+  });
+
+  it("clamps max_videos above 50 to 50 instead of passing the raw value to the playlistItems API", async () => {
+    // The MCP tool schema (index.ts) already caps max_videos at 50, but analyzeChannel
+    // is exported and callable directly, bypassing that schema — this defends the
+    // second call site independently. Regression coverage for that defense: nothing
+    // previously exercised a maxVideos argument above 50.
+    vi.useFakeTimers();
+    const mockFetch = vi.fn();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCVHVAPyVgjkAyfLiwbHyXyg",
+            snippet: { title: "Fireship" },
+            contentDetails: { relatedPlaylists: { uploads: "UUVHVAPyVgjkAyfLiwbHyXyg" } },
+          },
+        ],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [{ contentDetails: { videoId: "vid001" } }] }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-clamp", defaultDatasetId: "ds-clamp", status: "RUNNING" } }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-clamp", defaultDatasetId: "ds-clamp", status: "SUCCEEDED" } }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: "content" }] }],
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const resultPromise = analyzeChannel("@fireship", 200);
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    // Call 2 is the playlistItems request — assert it was clamped to 50, not 200
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("maxResults=50"),
+      expect.any(Object),
+    );
+    expect(mockFetch.mock.calls[1][0]).not.toContain("maxResults=200");
   });
 });
 
