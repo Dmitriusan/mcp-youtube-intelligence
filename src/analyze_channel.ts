@@ -607,7 +607,12 @@ ${truncated}`;
       try {
         parsed = JSON.parse(text) as typeof parsed;
       } catch {
-        console.warn(`[analyze_channel] Gemini returned unparseable JSON for video ${videoId}, skipping`);
+        // Counts toward the same "every attempted video produced nothing usable"
+        // check below as an HTTP-level failure — an all-malformed-JSON response is
+        // just as much a Gemini outage as an all-5xx one, and previously only the
+        // latter was surfaced as a thrown error instead of a silent empty success.
+        lastRequestError = `Gemini returned unparseable JSON for video ${videoId}`;
+        console.warn(`[analyze_channel] ${lastRequestError}, skipping`);
         continue;
       }
 
@@ -625,9 +630,9 @@ ${truncated}`;
     }
   }
 
-  // Every attempted video failed at the HTTP level — surface it as a total
-  // failure so analyzeChannel's note reports a Gemini outage instead of
-  // silently claiming success with zero structured topics.
+  // Every attempted video failed, whether at the HTTP level or via unparseable
+  // JSON — surface it as a total failure so analyzeChannel's note reports a
+  // Gemini outage instead of silently claiming success with zero structured topics.
   if (attempted > 0 && results.length === 0 && lastRequestError) {
     throw new Error(lastRequestError);
   }

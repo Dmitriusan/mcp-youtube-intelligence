@@ -700,6 +700,31 @@ describe("extractTopicsWithLLM", () => {
     expect(result[0].theme).toBe("Testing strategies");
   });
 
+  it("throws when every attempted video returns unparseable JSON, instead of silently returning an empty result", async () => {
+    // Mirrors the all-HTTP-failure case below: an all-malformed-JSON response is
+    // just as much a total Gemini outage, and analyzeChannel's note should report
+    // it as one rather than a clean "0 semantic topics" success.
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ candidates: [{ content: { parts: [{ text: "not-valid-json{{" }] } }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ candidates: [{ content: { parts: [{ text: "also-not-valid{{" }] } }] }),
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const items = [
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "some content about coding" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [{ text: "more content about testing" }] },
+    ];
+
+    await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(
+      /Gemini returned unparseable JSON for video vid002/,
+    );
+  });
+
   it("keeps structured topics from videos that succeeded when one video's Gemini request fails", async () => {
     const mockFetch = vi.fn()
       // vid001 — succeeds
