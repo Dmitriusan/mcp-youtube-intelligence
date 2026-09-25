@@ -33,6 +33,16 @@ You need API keys for three services:
 npm install -g mcp-youtube-intelligence
 ```
 
+## CLI flags
+
+```bash
+mcp-youtube-intelligence --version   # or -v — print the installed version and exit
+mcp-youtube-intelligence --help      # or -h — print usage and exit
+```
+
+Running the command with no flags starts the MCP server itself (stdio transport) — this is what
+an MCP client config invokes; it's not meant to be run bare in a terminal for interactive use.
+
 ## Usage
 
 Add to your Claude Desktop / MCP client config:
