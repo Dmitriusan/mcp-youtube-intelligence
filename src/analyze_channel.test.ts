@@ -103,6 +103,14 @@ describe("parseChannelInput", () => {
       value: "@fireship",
     });
   });
+
+  it("throws a specific error for an empty string instead of the generic unrecognized-format message", () => {
+    expect(() => parseChannelInput("")).toThrow(/channel_url must not be empty/);
+  });
+
+  it("throws a specific error for whitespace-only input", () => {
+    expect(() => parseChannelInput("   ")).toThrow(/channel_url must not be empty/);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -139,6 +139,10 @@ export function getGeminiApiKey(): string {
 export function parseChannelInput(input: string): ParsedChannel {
   const trimmed = input.trim();
 
+  if (!trimmed) {
+    throw new Error("channel_url must not be empty.");
+  }
+
   // Bare @handle — e.g. @fireship or @web.dev (periods allowed in handles)
   if (/^@[\w.-]+$/.test(trimmed)) return { type: "handle", value: trimmed };
 
