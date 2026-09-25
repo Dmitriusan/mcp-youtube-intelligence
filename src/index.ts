@@ -13,27 +13,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { analyzeChannel } from "./analyze_channel.js";
+import { getCliOutput } from "./cli.js";
 
 const require = createRequire(import.meta.url);
 const { version: packageVersion } = require("../package.json") as { version: string };
 
-if (process.argv.includes("--version") || process.argv.includes("-v")) {
-  console.log(packageVersion);
-  process.exit(0);
-}
-
-if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log(`mcp-youtube-intelligence v${packageVersion} — MCP server for YouTube channel intelligence
-
-Usage:
-  mcp-youtube-intelligence [options]
-
-Options:
-  --help, -h      Show this help message
-  --version, -v   Print the installed version
-
-Tools provided:
-  analyze_channel   Extract transcripts, topics, and competitive signals from a YouTube channel`);
+const cliOutput = getCliOutput(process.argv, packageVersion);
+if (cliOutput !== null) {
+  console.log(cliOutput);
   process.exit(0);
 }
 
