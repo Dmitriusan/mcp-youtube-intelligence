@@ -2718,6 +2718,155 @@ describe("analyzeChannel (Gemini degradation with key set)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// analyzeChannel — the note says why Gemini failed instead of "check logs"
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (note reports the Gemini failure cause)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+    process.env["GEMINI_API_KEY"] = "test-gemini-key";
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    delete process.env["GEMINI_API_KEY"];
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  // Queues the five calls that precede Gemini (channel lookup, playlist, Apify start / poll /
+  // dataset) and returns the mock so each test can queue its own Gemini outcome after them.
+  function mockFetchUpToGemini() {
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCtest1234567890ABCDE12",
+            snippet: { title: "Tech Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUtest1234567890ABCDE12" } },
+          },
+        ],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [{ contentDetails: { videoId: "vid001" } }] }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-001", defaultDatasetId: "ds-001", status: "RUNNING" } }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-001", defaultDatasetId: "ds-001", status: "SUCCEEDED" } }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          videoDetails: { videoId: "vid001" },
+          transcript: [{ text: "javascript typescript programming node framework" }],
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    return mockFetch;
+  }
+
+  async function runAnalyze() {
+    vi.useFakeTimers();
+    const resultPromise = analyzeChannel("@techchannel", 1);
+    await vi.runAllTimersAsync();
+    return resultPromise;
+  }
+
+  it("tells the caller why Gemini failed instead of just pointing at the logs", async () => {
+    const mockFetch = mockFetchUpToGemini();
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      text: async () =>
+        JSON.stringify({
+          error: {
+            code: 400,
+            message: "API key not valid. Please pass a valid API key.",
+            status: "INVALID_ARGUMENT",
+            details: [{ reason: "API_KEY_INVALID" }],
+          },
+        }),
+    });
+
+    const result = await runAnalyze();
+
+    expect(result.topics_structured).toEqual([]);
+    expect(result.topics.length).toBeGreaterThan(0);
+    expect(result.note).toContain("keyword topics only");
+    expect(result.note).toContain("Gemini API error 400: API key not valid. Please pass a valid API key.");
+    expect(result.note).not.toContain("check logs");
+  });
+
+  it("names the block reason when Gemini refuses every transcript", async () => {
+    const mockFetch = mockFetchUpToGemini();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ promptFeedback: { blockReason: "SAFETY" } }),
+    });
+
+    const result = await runAnalyze();
+
+    expect(result.topics_structured).toEqual([]);
+    expect(result.note).toContain("Gemini returned no content for video vid001 (SAFETY)");
+  });
+
+  it("never puts the Gemini API key in the note, even when an error message echoes the request URL", async () => {
+    const mockFetch = mockFetchUpToGemini();
+    // Some runtimes include the request URL, and so the key query parameter, in network errors.
+    mockFetch.mockRejectedValue(
+      new Error(
+        "request to https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=test-gemini-key failed",
+      ),
+    );
+
+    const result = await runAnalyze();
+
+    expect(result.note).toContain("[redacted]");
+    expect(result.note).not.toContain("test-gemini-key");
+  });
+
+  it("keeps the cause to one short line however large the error body is", async () => {
+    const mockFetch = mockFetchUpToGemini();
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 418,
+      text: async () => `upstream says:\n${"x".repeat(2000)}`,
+    });
+
+    const result = await runAnalyze();
+
+    expect(result.note).toContain("Gemini API error 418: upstream says: xxx");
+    expect(result.note).toContain("…");
+    expect(result.note).not.toContain("\n");
+    expect(result.note.length).toBeLessThan(500);
+  });
+
+  it("still says the key is missing, not that Gemini failed, when GEMINI_API_KEY is unset", async () => {
+    delete process.env["GEMINI_API_KEY"];
+    // Don't let the Corp secrets fallback supply a key on a machine that has one. Only the
+    // Gemini lookup reaches the file: the other two keys come from the env vars set above.
+    vi.mocked(readFileSync).mockImplementationOnce(() => { throw new Error("ENOENT"); });
+    mockFetchUpToGemini();
+
+    const result = await runAnalyze();
+
+    expect(result.note).toContain("GEMINI_API_KEY not configured");
+    expect(result.note).not.toContain("extraction failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // analyzeChannel — end-to-end with Gemini semantic extraction enabled
 // ---------------------------------------------------------------------------
 describe("analyzeChannel (Gemini path, mocked fetch)", () => {

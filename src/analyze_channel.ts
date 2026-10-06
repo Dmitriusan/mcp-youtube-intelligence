@@ -29,6 +29,7 @@ const GEMINI_TRANSCRIPT_WORD_LIMIT = 1000;
 const DEFAULT_OUTPUT_DIR = "./output/";
 const MAX_VIDEOS = 50;
 const FETCH_TIMEOUT_MS = 30_000; // bound every outbound request so a stalled external API can't hang the tool call indefinitely
+const NOTE_CAUSE_MAX_CHARS = 200; // cap on a failure cause quoted in the result's `note`
 
 // ---------------------------------------------------------------------------
 // Fetch helper
@@ -735,6 +736,15 @@ export function extractTopics(transcriptItems: unknown[], topN = 20): string[] {
 // Main: analyzeChannel
 // ---------------------------------------------------------------------------
 
+// The note is read by the MCP client's model, which cannot see this server's stderr, so a
+// failure cause has to travel in the result itself. Collapse it to one short line, and scrub
+// the API key: it rides in the request URL, and some runtimes echo the URL in network errors.
+function summarizeFailure(message: string, secret?: string): string {
+  const scrubbed = secret ? message.split(secret).join("[redacted]") : message;
+  const oneLine = scrubbed.replace(/\s+/g, " ").trim() || "unknown error";
+  return oneLine.length > NOTE_CAUSE_MAX_CHARS ? `${oneLine.slice(0, NOTE_CAUSE_MAX_CHARS)}…` : oneLine;
+}
+
 export async function analyzeChannel(
   channelInput: string,
   maxVideos: number,
@@ -774,20 +784,24 @@ export async function analyzeChannel(
   let topics_structured: TopicStructured[] = [];
   let geminiUsed = false;
   let geminiConfigured = false;
+  let geminiKey: string | undefined;
+  let geminiFailure = "";
   try {
-    const geminiKey = getGeminiApiKey();
+    geminiKey = getGeminiApiKey();
     geminiConfigured = true;
     topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey);
     geminiUsed = true;
   } catch (err) {
     // Graceful degradation — topics_structured stays empty; topics is the fallback
-    console.warn(`[analyze_channel] Gemini extraction unavailable, using keyword fallback: ${err instanceof Error ? err.message : String(err)}`);
+    const reason = err instanceof Error ? err.message : String(err);
+    geminiFailure = summarizeFailure(reason, geminiKey);
+    console.warn(`[analyze_channel] Gemini extraction unavailable, using keyword fallback: ${reason}`);
   }
 
   const note = geminiUsed
     ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics_structured.length} semantic topics (topics_structured) via Gemini, ${topics.length} keyword topics as supplemental.`
     : geminiConfigured
-    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (Gemini API error — check logs for details).`
+    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (Gemini extraction failed — ${geminiFailure}).`
     : `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (GEMINI_API_KEY not configured). Set GEMINI_API_KEY for richer structured analysis.`;
 
   const result: AnalyzeChannelResult = {

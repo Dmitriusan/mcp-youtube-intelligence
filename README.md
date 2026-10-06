@@ -19,7 +19,7 @@ You need API keys for three services:
 | `APIFY_TOKEN` | [Apify Console](https://console.apify.com/) → Account → Integrations → API token |
 | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) → Get API key |
 
-`GEMINI_API_KEY` is optional — if omitted, the tool falls back to word-frequency topic extraction instead of semantic analysis.
+`GEMINI_API_KEY` is optional — if omitted, the tool falls back to word-frequency topic extraction instead of semantic analysis. The same fallback applies when a configured Gemini call fails (invalid key, exhausted quota, blocked content); the result's `note` says why.
 
 **Optional**
 
@@ -78,6 +78,20 @@ channel_url: YouTube channel URL or @handle. Accepts:
                - legacy /c/name or /user/name URL
 max_videos:  Number of recent videos to analyze (default: 5, max: 50)
 ```
+
+Returns a JSON object:
+
+| Field | Meaning |
+|-------|---------|
+| `channel_id`, `channel_title` | The resolved channel |
+| `channel_url` | Your `channel_url` input, echoed back |
+| `sample_video_ids` | The most recent uploads that were analyzed |
+| `videos_analyzed` | How many videos were fetched from the channel's uploads playlist |
+| `transcripts_available` | How many of those came back with caption content |
+| `topics` | Up to 20 top keywords by frequency across all transcripts. Always computed |
+| `topics_structured` | Per video: `theme`, `entities[]`, `tags[]` from Gemini. Empty when Gemini is not configured or fails. Only the first 1,000 words of each transcript are sent, and a video Gemini blocks or returns nothing usable for is left out |
+| `note` | Which analysis mode ran. When Gemini was configured but failed, it also says why |
+| `output_path` | Where the JSON artifact was written. Absent if the write failed |
 
 **Example prompt:** "Analyze the @fireship YouTube channel and tell me what topics they cover most."
 
