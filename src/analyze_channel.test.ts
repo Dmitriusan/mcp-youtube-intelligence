@@ -2510,6 +2510,119 @@ describe("extractTopicsWithLLM (auth failure short-circuit)", () => {
     // vid002 is never attempted — the first 403 already establishes the key is bad
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
+
+  describe("invalid key reported as HTTP 400", () => {
+    // Google does not answer a bad or expired API key with 401/403: it answers 400
+    // INVALID_ARGUMENT with reason API_KEY_INVALID. This body is what the live
+    // generativelanguage API returned for a made-up key.
+    const invalidKeyResponse = {
+      ok: false,
+      status: 400,
+      text: async () =>
+        JSON.stringify({
+          error: {
+            code: 400,
+            message: "API key not valid. Please pass a valid API key.",
+            status: "INVALID_ARGUMENT",
+            details: [
+              {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                reason: "API_KEY_INVALID",
+                domain: "googleapis.com",
+                metadata: { service: "generativelanguage.googleapis.com" },
+              },
+            ],
+          },
+        }),
+    };
+    const items = [
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "first video content" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [{ text: "second video content" }] },
+      { videoDetails: { videoId: "vid003" }, transcript: [{ text: "third video content" }] },
+    ];
+
+    it("stops attempting further videos and keeps results already collected", async () => {
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: JSON.stringify({ theme: "First video", entities: [], tags: [] }) }] } }],
+          }),
+        })
+        .mockResolvedValueOnce(invalidKeyResponse);
+      // vid003 must never be called — no third mock provided
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await extractTopicsWithLLM(items, "bad-key");
+      expect(result).toEqual([{ video_id: "vid001", theme: "First video", entities: [], tags: [] }]);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws Google's own message instead of the raw JSON body", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce(invalidKeyResponse);
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(extractTopicsWithLLM(items, "bad-key")).rejects.toThrow(
+        /^Gemini API error 400: API key not valid\. Please pass a valid API key\.$/,
+      );
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("recognises an expired key from the message when the body carries no details", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ error: { code: 400, message: "API key expired. Please renew the API key." } }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(extractTopicsWithLLM(items, "bad-key")).rejects.toThrow(/API key expired/);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps going after a 400 whose reason is not an invalid key", async () => {
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () =>
+            JSON.stringify({
+              error: {
+                code: 400,
+                message: "Request contains an invalid argument.",
+                status: "INVALID_ARGUMENT",
+                details: [{ reason: "SOMETHING_ELSE" }],
+              },
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: JSON.stringify({ theme: "Second video", entities: [], tags: [] }) }] } }],
+          }),
+        });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await extractTopicsWithLLM(items.slice(0, 2), "test-key");
+      expect(result.map((r) => r.video_id)).toEqual(["vid002"]);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("leaves a non-JSON error body untouched apart from trimming it", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        text: async () => "<html>Bad gateway</html>\n",
+      });
+      // A 502 is retried once, so the same body comes back on the second attempt.
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 502, text: async () => "<html>Bad gateway</html>\n" });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(extractTopicsWithLLM(items.slice(0, 1), "test-key")).rejects.toThrow(
+        /^Gemini API error 502: <html>Bad gateway<\/html>$/,
+      );
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

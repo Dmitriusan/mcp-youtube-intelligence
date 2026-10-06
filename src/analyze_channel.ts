@@ -517,6 +517,24 @@ interface GeminiResponse {
   promptFeedback?: { blockReason?: string };
 }
 
+// Google APIs report errors as {"error": {"code", "message", "status", "details": [{"reason"}]}}.
+// Returns the readable message and, when present, the machine-readable reason. A body in any
+// other shape (plain text, an HTML error page from a proxy) comes back trimmed and otherwise
+// untouched.
+function parseGoogleError(body: string): { message: string; reason?: string } {
+  try {
+    const error = (JSON.parse(body) as { error?: { message?: unknown; details?: unknown } } | null)?.error;
+    if (typeof error?.message === "string" && error.message) {
+      const details = Array.isArray(error.details) ? (error.details as Array<{ reason?: unknown }>) : [];
+      const reason = details.map((d) => d?.reason).find((r): r is string => typeof r === "string");
+      return { message: error.message, reason };
+    }
+  } catch {
+    // Not JSON — fall through to the raw text.
+  }
+  return { message: body.trim() };
+}
+
 export async function extractTopicsWithLLM(
   transcriptItems: unknown[],
   geminiApiKey: string,
@@ -598,16 +616,20 @@ ${truncated}`;
       }
 
       if (!resp.ok) {
-        const detail = await resp.text();
-        if (resp.status === 401 || resp.status === 403) {
+        const { message, reason } = parseGoogleError(await resp.text());
+        const failure = `Gemini API error ${resp.status}: ${message}`;
+        // Google reports a bad or expired key as HTTP 400 with reason API_KEY_INVALID, not as
+        // 401/403, so the status alone missed the commonest credential failure.
+        const badKey = reason === "API_KEY_INVALID" || /^API key (not valid|expired)/i.test(message);
+        if (resp.status === 401 || resp.status === 403 || badKey) {
           // Auth failures are invariant across requests using the same key — every
           // remaining video would fail identically, so stop instead of repeating a
           // doomed call up to max_videos times.
-          lastRequestError = `Gemini API error ${resp.status}: ${detail}`;
+          lastRequestError = failure;
           console.warn(`[analyze_channel] Gemini authentication failed (${resp.status}), aborting remaining videos: ${lastRequestError}`);
           break;
         }
-        throw new Error(`Gemini API error ${resp.status}: ${detail}`);
+        throw new Error(failure);
       }
 
       const body = await parseJsonResponse<GeminiResponse>(resp, "Gemini API");
