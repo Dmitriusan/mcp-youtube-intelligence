@@ -500,16 +500,21 @@ const TECH_TERMS = new Set([
 // LLM semantic extraction — Gemini 2.5 Flash (primary route per SC Night 141)
 // ---------------------------------------------------------------------------
 
+// Every field below is optional because Gemini omits them when it blocks or stops a
+// generation: a blocked prompt has no candidates at all (promptFeedback.blockReason
+// says why), and a stopped candidate has no content parts (finishReason says why).
 interface GeminiContent {
-  parts: Array<{ text: string }>;
+  parts?: Array<{ text?: string }>;
 }
 
 interface GeminiCandidate {
-  content: GeminiContent;
+  content?: GeminiContent;
+  finishReason?: string;
 }
 
 interface GeminiResponse {
   candidates?: GeminiCandidate[];
+  promptFeedback?: { blockReason?: string };
 }
 
 export async function extractTopicsWithLLM(
@@ -606,26 +611,52 @@ ${truncated}`;
       }
 
       const body = await parseJsonResponse<GeminiResponse>(resp, "Gemini API");
-      const text = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-      let parsed: { theme?: string; entities?: string[]; tags?: string[] } = {};
+      const candidate = body.candidates?.[0];
+      const text = candidate?.content?.parts?.[0]?.text;
+      // Each of the four checks below counts toward the same "every attempted video
+      // produced nothing usable" total-failure check after the loop as an HTTP-level
+      // failure does: a Gemini that answers 200 with nothing parseable is as much an
+      // outage as one that answers 5xx, and must not be reported as a clean success.
+      if (typeof text !== "string" || !text.trim()) {
+        // A blocked prompt or a stopped generation is still HTTP 200. This used to fall
+        // through a "{}" default and be recorded as a successful, empty analysis.
+        const why = body.promptFeedback?.blockReason ?? candidate?.finishReason;
+        lastRequestError = `Gemini returned no content for video ${videoId}${why ? ` (${why})` : ""}`;
+        console.warn(`[analyze_channel] ${lastRequestError}, skipping`);
+        continue;
+      }
+      let parsed: unknown;
       try {
-        parsed = JSON.parse(text) as typeof parsed;
+        parsed = JSON.parse(text);
       } catch {
-        // Counts toward the same "every attempted video produced nothing usable"
-        // check below as an HTTP-level failure — an all-malformed-JSON response is
-        // just as much a Gemini outage as an all-5xx one, and previously only the
-        // latter was surfaced as a thrown error instead of a silent empty success.
         lastRequestError = `Gemini returned unparseable JSON for video ${videoId}`;
         console.warn(`[analyze_channel] ${lastRequestError}, skipping`);
         continue;
       }
+      // Valid JSON is not necessarily an object: `null` used to throw a cryptic
+      // "Cannot read properties of null", and an array or a bare scalar was recorded
+      // as an empty entry.
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        lastRequestError = `Gemini returned an unexpected JSON shape for video ${videoId}`;
+        console.warn(`[analyze_channel] ${lastRequestError}, skipping`);
+        continue;
+      }
 
-      results.push({
+      const fields = parsed as { theme?: string; entities?: string[]; tags?: string[] };
+      const entry: TopicStructured = {
         video_id: videoId,
-        theme: parsed.theme ?? "",
-        entities: parsed.entities ?? [],
-        tags: parsed.tags ?? [],
-      });
+        theme: fields.theme ?? "",
+        entities: fields.entities ?? [],
+        tags: fields.tags ?? [],
+      };
+      // Partial objects stay valid (only a theme, only tags, ...). One carrying nothing
+      // at all tells the caller nothing and would inflate the "semantic topics" count.
+      if (!entry.theme && !entry.entities.length && !entry.tags.length) {
+        lastRequestError = `Gemini returned no usable topics for video ${videoId}`;
+        console.warn(`[analyze_channel] ${lastRequestError}, skipping`);
+        continue;
+      }
+      results.push(entry);
     } catch (err) {
       // Isolate this video's failure so one bad request doesn't discard
       // structured topics already extracted for the rest of the channel's videos.

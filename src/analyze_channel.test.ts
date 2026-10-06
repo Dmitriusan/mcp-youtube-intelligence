@@ -763,6 +763,104 @@ describe("extractTopicsWithLLM", () => {
     expect(result).toHaveLength(2);
     expect(result.map((r) => r.video_id)).toEqual(["vid001", "vid003"]);
   });
+
+  describe("200 responses with no usable content", () => {
+    const geminiTextResponse = (text: string) => ({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }),
+    });
+    const validResponse = geminiTextResponse(JSON.stringify({ theme: "Real topic", entities: ["X"], tags: ["x"] }));
+    const items = [
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "first video content" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [{ text: "second video content" }] },
+    ];
+
+    it("throws when the only prompt is blocked (no candidates), instead of recording an empty entry", async () => {
+      // A safety-blocked prompt comes back as HTTP 200 with promptFeedback.blockReason and no
+      // candidates. This used to fall through a "{}" default and be reported as a success.
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ promptFeedback: { blockReason: "SAFETY" } }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(extractTopicsWithLLM([items[0]], "test-key")).rejects.toThrow(
+        /Gemini returned no content for video vid001 \(SAFETY\)/,
+      );
+    });
+
+    it("skips a candidate that was stopped without content and keeps the other videos", async () => {
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ candidates: [{ finishReason: "RECITATION" }] }),
+        })
+        .mockResolvedValueOnce(validResponse);
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await extractTopicsWithLLM(items, "test-key");
+      expect(result).toEqual([{ video_id: "vid002", theme: "Real topic", entities: ["X"], tags: ["x"] }]);
+    });
+
+    it("explains a content-less response even when Gemini gives no reason", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ candidates: [] }) });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(extractTopicsWithLLM([items[0]], "test-key")).rejects.toThrow(
+        /^Gemini returned no content for video vid001$/,
+      );
+    });
+
+    it.each([
+      ["null", "null"],
+      ["an array", "[]"],
+      ["a bare string", JSON.stringify("just text")],
+      ["a number", "42"],
+    ])("skips JSON that is %s rather than an object", async (_label, text) => {
+      // `null` used to surface as a cryptic "Cannot read properties of null (reading 'theme')"
+      // and the other non-object values were recorded as empty entries.
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce(geminiTextResponse(text))
+        .mockResolvedValueOnce(validResponse);
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await extractTopicsWithLLM(items, "test-key");
+      expect(result.map((r) => r.video_id)).toEqual(["vid002"]);
+    });
+
+    it("reports an unexpected JSON shape when every video returns a non-object", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce(geminiTextResponse("null"));
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(extractTopicsWithLLM([items[0]], "test-key")).rejects.toThrow(
+        /Gemini returned an unexpected JSON shape for video vid001/,
+      );
+    });
+
+    it("does not record an object with no theme, entities or tags as a semantic topic", async () => {
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce(geminiTextResponse("{}"))
+        .mockResolvedValueOnce(geminiTextResponse(JSON.stringify({ theme: "", entities: [], tags: [] })));
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(extractTopicsWithLLM(items, "test-key")).rejects.toThrow(
+        /Gemini returned no usable topics for video vid002/,
+      );
+    });
+
+    it("keeps an object that carries only entities or only tags", async () => {
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce(geminiTextResponse(JSON.stringify({ entities: ["Rust"] })))
+        .mockResolvedValueOnce(geminiTextResponse(JSON.stringify({ tags: ["systems"] })));
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await extractTopicsWithLLM(items, "test-key");
+      expect(result).toEqual([
+        { video_id: "vid001", theme: "", entities: ["Rust"], tags: [] },
+        { video_id: "vid002", theme: "", entities: [], tags: ["systems"] },
+      ]);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
