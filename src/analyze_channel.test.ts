@@ -3031,3 +3031,125 @@ describe("analyzeChannel (Gemini path, mocked fetch)", () => {
     expect(result.note).toContain("1 with transcripts");
   });
 });
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — no video returned a transcript
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (no captions returned)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+    process.env["GEMINI_API_KEY"] = "test-gemini-key";
+  });
+
+  afterEach(async () => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    delete process.env["GEMINI_API_KEY"];
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    // restoreAllMocks does not reset a vi.fn(), so put the real-file passthrough back after
+    // the tests that make the secrets-file lookup fail.
+    const actualFs = await vi.importActual<typeof import("fs")>("fs");
+    vi.mocked(readFileSync).mockImplementation(((...args: unknown[]) =>
+      (actualFs.readFileSync as (...a: unknown[]) => unknown)(...args)) as unknown as typeof readFileSync);
+  });
+
+  // The five calls every run makes before any Gemini call: channel lookup, playlist, and the
+  // Apify start / poll / dataset fetch. `dataset` is what the transcript scraper returns.
+  function mockFetchWithDataset(dataset: unknown[]) {
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCtest1234567890ABCDE12",
+            snippet: { title: "Quiet Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUtest1234567890ABCDE12" } },
+          },
+        ],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [{ contentDetails: { videoId: "vid001" } }, { contentDetails: { videoId: "vid002" } }] }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-001", defaultDatasetId: "ds-001", status: "RUNNING" } }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-001", defaultDatasetId: "ds-001", status: "SUCCEEDED" } }),
+    });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => dataset });
+    vi.stubGlobal("fetch", mockFetch);
+    return mockFetch;
+  }
+
+  async function runAnalyze() {
+    vi.useFakeTimers();
+    const resultPromise = analyzeChannel("@quietchannel", 2);
+    await vi.runAllTimersAsync();
+    return resultPromise;
+  }
+
+  const emptyTranscripts = [
+    { videoDetails: { videoId: "vid001" }, transcript: [] },
+    { videoDetails: { videoId: "vid002" }, transcript: "  " },
+  ];
+
+  it("says no video returned a transcript instead of claiming a Gemini analysis", async () => {
+    const mockFetch = mockFetchWithDataset(emptyTranscripts);
+
+    const result = await runAnalyze();
+
+    expect(result.transcripts_available).toBe(0);
+    expect(result.topics).toEqual([]);
+    expect(result.topics_structured).toEqual([]);
+    expect(result.note).toContain("none returned a transcript");
+    // The old note read "0 semantic topics (topics_structured) via Gemini", although Gemini was never asked.
+    expect(result.note).not.toContain("via Gemini");
+    expect(result.note).not.toContain("semantic topics");
+    // Nothing to analyze, so nothing was sent to Gemini: only the five calls before it.
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not tell the user to set GEMINI_API_KEY when a key would not have helped", async () => {
+    delete process.env["GEMINI_API_KEY"];
+    // Keep the Corp secrets fallback from supplying a key on a machine that has one.
+    vi.mocked(readFileSync).mockImplementation(() => { throw new Error("ENOENT"); });
+    mockFetchWithDataset(emptyTranscripts);
+
+    const result = await runAnalyze();
+
+    expect(result.note).toContain("none returned a transcript");
+    expect(result.note).not.toContain("GEMINI_API_KEY");
+  });
+
+  it("handles an empty dataset from the scraper the same way", async () => {
+    mockFetchWithDataset([]);
+
+    const result = await runAnalyze();
+
+    expect(result.videos_analyzed).toBe(2);
+    expect(result.transcripts_available).toBe(0);
+    expect(result.note).toContain("none returned a transcript");
+  });
+
+  it("still reports the Gemini key as missing when at least one video has a transcript", async () => {
+    delete process.env["GEMINI_API_KEY"];
+    vi.mocked(readFileSync).mockImplementation(() => { throw new Error("ENOENT"); });
+    mockFetchWithDataset([
+      { videoDetails: { videoId: "vid001" }, transcript: [{ text: "kubernetes deployment pipeline" }] },
+      { videoDetails: { videoId: "vid002" }, transcript: [] },
+    ]);
+
+    const result = await runAnalyze();
+
+    expect(result.transcripts_available).toBe(1);
+    expect(result.note).toContain("GEMINI_API_KEY not configured");
+    expect(result.note).not.toContain("none returned a transcript");
+  });
+});

@@ -791,19 +791,27 @@ export async function analyzeChannel(
   let geminiConfigured = false;
   let geminiKey: string | undefined;
   let geminiFailure = "";
-  try {
-    geminiKey = getGeminiApiKey();
-    geminiConfigured = true;
-    topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey);
-    geminiUsed = true;
-  } catch (err) {
-    // Graceful degradation — topics_structured stays empty; topics is the fallback
-    const reason = err instanceof Error ? err.message : String(err);
-    geminiFailure = summarizeFailure(reason, geminiKey);
-    console.warn(`[analyze_channel] Gemini extraction unavailable, using keyword fallback: ${reason}`);
+  // With no transcript text at all there is nothing for Gemini to read, and no key would change
+  // that, so skip the call (and the key lookup) rather than report "0 semantic topics via Gemini"
+  // or tell the user to set GEMINI_API_KEY for a result it could not improve.
+  const nothingToAnalyze = transcriptsAvailable === 0;
+  if (!nothingToAnalyze) {
+    try {
+      geminiKey = getGeminiApiKey();
+      geminiConfigured = true;
+      topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey);
+      geminiUsed = true;
+    } catch (err) {
+      // Graceful degradation — topics_structured stays empty; topics is the fallback
+      const reason = err instanceof Error ? err.message : String(err);
+      geminiFailure = summarizeFailure(reason, geminiKey);
+      console.warn(`[analyze_channel] Gemini extraction unavailable, using keyword fallback: ${reason}`);
+    }
   }
 
-  const note = geminiUsed
+  const note = nothingToAnalyze
+    ? `Analyzed ${videoIds.length} video(s), but none returned a transcript (captions disabled or unavailable, or the transcript scraper could not read them), so topics and topics_structured are empty.`
+    : geminiUsed
     ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics_structured.length} semantic topics (topics_structured) via Gemini, ${topics.length} keyword topics as supplemental.`
     : geminiConfigured
     ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (Gemini extraction failed — ${geminiFailure}).`

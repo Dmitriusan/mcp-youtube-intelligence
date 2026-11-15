@@ -90,7 +90,7 @@ Returns a JSON object:
 | `transcripts_available` | How many of those came back with caption content |
 | `topics` | Up to 20 top keywords by frequency across all transcripts. Always computed. Counts plain English words only: a word with an accented or non-Latin letter is skipped, so a transcript in another language gives few or no keywords here (`topics_structured` still works for it when Gemini is configured) |
 | `topics_structured` | Per video: `theme`, `entities[]`, `tags[]` from Gemini. Empty when Gemini is not configured or fails. Only the first 1,000 words of each transcript are sent, and a video Gemini blocks or returns nothing usable for is left out |
-| `note` | Which analysis mode ran. When Gemini was configured but failed, it also says why |
+| `note` | Which analysis mode ran. When Gemini was configured but failed, or when none of the videos returned a transcript (so there was nothing to analyze), it also says why |
 | `output_path` | Where the JSON artifact was written. Absent if the write failed |
 
 **Example prompt:** "Analyze the @fireship YouTube channel and tell me what topics they cover most."
