@@ -25,7 +25,7 @@ You need API keys for three services:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANALYZE_CHANNEL_OUTPUT_DIR` | `./output/` | Directory where per-channel JSON analysis artifacts are written |
+| `ANALYZE_CHANNEL_OUTPUT_DIR` | `./output/` | Directory where per-channel JSON analysis artifacts are written. The default is relative to the server's working directory, which your MCP client chooses (some start servers in `/`, where the write is denied). Set an absolute path to be sure: when the write fails the analysis still succeeds, but the result has no `output_path` and the reason goes only to stderr |
 
 ## Installation
 
