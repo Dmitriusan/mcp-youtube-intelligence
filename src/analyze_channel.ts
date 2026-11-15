@@ -718,7 +718,12 @@ export function extractTopics(transcriptItems: unknown[], topN = 20): string[] {
       text = snippets;
     }
 
-    const words = text.toLowerCase().match(/\b[a-z]{2,}\b/g) ?? [];
+    // Split into maximal runs of letters, marks, digits and underscores, then keep only the runs
+    // that are plain ASCII words. A `\b[a-z]{2,}\b` match treats every non-ASCII letter as a word
+    // boundary, so "Zürich" came out as the topic "rich" and "dzień" as "dzie". For ASCII text the
+    // two are identical ("gpt4" and "snake_case" are still skipped); a word with an accented or
+    // non-Latin letter is now dropped whole instead of leaving its ASCII fragment behind.
+    const words = (text.toLowerCase().match(/[\p{L}\p{M}\p{N}_]+/gu) ?? []).filter((w) => /^[a-z]{2,}$/.test(w));
     for (const word of words) {
       if ((word.length >= 4 || TECH_TERMS.has(word)) && !STOPWORDS.has(word) && !CONTRACTION_STOPWORDS.has(word)) {
         freq[word] = (freq[word] ?? 0) + 1;

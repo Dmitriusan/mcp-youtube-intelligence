@@ -221,6 +221,62 @@ describe("extractTopics", () => {
       expect(topics).not.toContain(fragment);
     }
   });
+
+  describe("words containing non-ASCII letters", () => {
+    // `\b[a-z]{2,}\b` treats every non-ASCII letter as a word boundary, so a word like
+    // "Zürich" was cut into "z" + "rich" and the fragment "rich" was counted as a topic.
+    // A word with an accented letter is not an English keyword at all and must be dropped
+    // whole, never reported as its ASCII leftovers.
+    it("does not report the ASCII tail of an accented word as a topic", () => {
+      const items = [{ transcript: [{ text: "We flew to Zürich and bought a Bücher guide in Zürich" }] }];
+      const topics = extractTopics(items, 20);
+      expect(topics).not.toContain("rich");
+      expect(topics).not.toContain("cher");
+      // the plain-English words around them are untouched
+      expect(topics).toContain("flew");
+      expect(topics).toContain("bought");
+      expect(topics).toContain("guide");
+    });
+
+    it("does not report fragments of Polish or French words", () => {
+      const items = [
+        {
+          transcript: [
+            { text: "Dzień dobry, jutro będzie dzień wspaniały, wspaniały dzień" },
+            { text: "le français parle français avec un accent français" },
+          ],
+        },
+      ];
+      const topics = extractTopics(items, 20);
+      for (const fragment of ["dzie", "wspania", "fran", "ais"]) {
+        expect(topics).not.toContain(fragment);
+      }
+      // ASCII-only words in the same transcript still count
+      expect(topics).toContain("dobry");
+      expect(topics).toContain("parle");
+      expect(topics).toContain("accent");
+    });
+
+    it("returns no topics for a transcript with no ASCII words at all", () => {
+      const items = [{ transcript: [{ text: "Привіт, сьогодні ми розглянемо новий фреймворк" }] }];
+      expect(extractTopics(items, 20)).toEqual([]);
+    });
+
+    it("drops a word glued to a combining mark instead of keeping its ASCII prefix", () => {
+      // "cafe" + U+0301 (decomposed é): the whole token is not an ASCII word.
+      const items = [{ transcript: [{ text: "the café serves coffee" }] }];
+      const topics = extractTopics(items, 20);
+      expect(topics).not.toContain("cafe");
+      expect(topics).toContain("serves");
+      expect(topics).toContain("coffee");
+    });
+
+    it("still ignores letters glued to digits or underscores, as before", () => {
+      // Unchanged behaviour for ASCII: "gpt4" and "snake_case" are not plain words.
+      const items = [{ transcript: [{ text: "gpt4 snake_case node18 pipeline" }] }];
+      expect(extractTopics(items, 20)).toEqual(["pipeline"]);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
