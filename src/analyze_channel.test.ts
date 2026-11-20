@@ -3339,3 +3339,186 @@ describe("connection failures name the service and the reason", () => {
     ).rejects.toThrow("Gemini API request failed: connect ECONNREFUSED 127.0.0.1:443");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Error bodies — one readable line, not the raw response
+// ---------------------------------------------------------------------------
+// Real bodies are verbose: YouTube's invalid-key error is ~900 characters of pretty-printed JSON
+// that says the same sentence three times, and a gateway in front of an API answers with a whole
+// HTML page. The message goes to an MCP client's model, so it should carry the sentence and the
+// machine-readable code, nothing else.
+describe("error bodies are condensed to one readable line", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const youtubeBadKeyBody = JSON.stringify(
+    {
+      error: {
+        code: 400,
+        message: "API key not valid. Please pass a valid API key.",
+        errors: [{ message: "API key not valid. Please pass a valid API key.", domain: "global", reason: "badRequest" }],
+        status: "INVALID_ARGUMENT",
+        details: [
+          { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "API_KEY_INVALID", domain: "googleapis.com" },
+          { "@type": "type.googleapis.com/google.rpc.LocalizedMessage", locale: "en-US", message: "API key not valid. Please pass a valid API key." },
+        ],
+      },
+    },
+    null,
+    2,
+  );
+  const htmlGatewayPage =
+    `<!DOCTYPE html><html><head><title>502 Bad Gateway</title><style>body{font:12px sans-serif}</style></head>` +
+    `<body><h1>502 Bad Gateway</h1><script>var pad="${"x".repeat(3000)}";</script><p>nginx</p>${"<div>filler</div>".repeat(500)}</body></html>`;
+
+  function failWith(status: number, body: string | (() => Promise<string>)) {
+    return vi.fn().mockResolvedValue({
+      ok: false,
+      status,
+      text: typeof body === "string" ? async () => body : body,
+    });
+  }
+
+  it("keeps the sentence and the Google reason from a YouTube error body, drops the rest", async () => {
+    vi.stubGlobal("fetch", failWith(400, youtubeBadKeyBody));
+
+    const failure = await resolveChannel("@testchannel", "test-api-key").catch((e: unknown) => e as Error);
+
+    expect(failure.message).toBe(
+      "YouTube channels API error 400: API key not valid. Please pass a valid API key. (API_KEY_INVALID)",
+    );
+  });
+
+  it("falls back to the first errors[] reason when there is no ErrorInfo, and strips markup from the sentence", async () => {
+    vi.stubGlobal(
+      "fetch",
+      failWith(
+        403,
+        JSON.stringify({
+          error: {
+            code: 403,
+            message: 'The request cannot be completed because you have exceeded your <a href="/youtube/v3/getting-started#quota">quota</a>.',
+            errors: [{ domain: "youtube.quota", reason: "quotaExceeded" }],
+          },
+        }),
+      ),
+    );
+
+    await expect(getRecentVideoIds("PLtest1234", 3, "test-api-key")).rejects.toThrow(
+      "YouTube playlistItems API error 403: The request cannot be completed because you have exceeded your quota. (quotaExceeded)",
+    );
+  });
+
+  it("keeps Apify's error type next to its message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      failWith(
+        401,
+        JSON.stringify({ error: { type: "user-or-token-not-found", message: "User was not found or authentication token is not valid" } }),
+      ),
+    );
+
+    await expect(runApifyTranscriptScraper(["https://www.youtube.com/watch?v=abc"], "bad-token")).rejects.toThrow(
+      "Apify start run failed 401: User was not found or authentication token is not valid (user-or-token-not-found)",
+    );
+  });
+
+  it("does not repeat a code the sentence already contains", async () => {
+    vi.stubGlobal(
+      "fetch",
+      failWith(400, JSON.stringify({ error: { type: "invalid-input", message: "Input is invalid-input: urls missing" } })),
+    );
+
+    await expect(runApifyTranscriptScraper(["https://www.youtube.com/watch?v=abc"], "t")).rejects.toThrow(
+      /^Apify start run failed 400: Input is invalid-input: urls missing$/,
+    );
+  });
+
+  it("reduces an HTML gateway page to its text on one short line", async () => {
+    vi.stubGlobal("fetch", failWith(502, htmlGatewayPage));
+
+    const failure = await resolveChannel("@testchannel", "test-api-key").catch((e: unknown) => e as Error);
+
+    expect(failure.message).toMatch(/^YouTube channels API error 502: 502 Bad Gateway/);
+    expect(failure.message).not.toMatch(/[<>]/);
+    expect(failure.message).not.toContain("xxxxx");
+    expect(failure.message).not.toContain("font:");
+    expect(failure.message).not.toContain("\n");
+    expect(failure.message.length).toBeLessThan(400);
+  });
+
+  it.each([
+    ["YouTube search API", () => resolveChannel("https://www.youtube.com/c/fireship", "test-api-key")],
+    ["YouTube playlistItems API", () => getRecentVideoIds("PLtest1234", 3, "test-api-key")],
+    ["Apify dataset fetch", () => runApifyTranscriptScraper(["https://www.youtube.com/watch?v=abc"], "t")],
+  ])("applies to the %s error path as well", async (service, call) => {
+    if (service === "Apify dataset fetch") {
+      // start run and poll succeed; only the dataset fetch fails
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce({ ok: true, status: 201, json: async () => ({ data: { id: "run1", defaultDatasetId: "ds1", status: "READY" } }) })
+          .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: { status: "SUCCEEDED" } }) })
+          .mockResolvedValue({ ok: false, status: 401, text: async () => htmlGatewayPage }),
+      );
+      const settled = call().catch((e: unknown) => e as Error);
+      await vi.advanceTimersByTimeAsync(20_000);
+      const failure = await settled;
+      vi.useRealTimers();
+      expect(failure.message).toMatch(/^Apify dataset fetch failed 401: 502 Bad Gateway/);
+      expect(failure.message.length).toBeLessThan(400);
+      return;
+    }
+    vi.stubGlobal("fetch", failWith(401, htmlGatewayPage));
+    const failure = await call().catch((e: unknown) => e as Error);
+    expect(failure.message).toContain("502 Bad Gateway");
+    expect(failure.message).not.toMatch(/[<>]/);
+    expect(failure.message.length).toBeLessThan(400);
+  });
+
+  it("leaves a short plain-text body as it was", async () => {
+    vi.stubGlobal("fetch", failWith(401, "Unauthorized"));
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      /^YouTube channels API error 401: Unauthorized$/,
+    );
+  });
+
+  it("collapses a JSON body of another shape to one capped line", async () => {
+    vi.stubGlobal("fetch", failWith(429, JSON.stringify({ detail: "slow down", pad: "y".repeat(1000) }, null, 2)));
+
+    const failure = await resolveChannel("@testchannel", "test-api-key").catch((e: unknown) => e as Error);
+
+    expect(failure.message).toContain('"detail": "slow down"');
+    expect(failure.message).not.toContain("\n");
+    expect(failure.message.length).toBeLessThan(400);
+  });
+
+  it("accepts the older error-as-a-string form", async () => {
+    vi.stubGlobal("fetch", failWith(403, JSON.stringify({ error: "forbidden_by_policy" })));
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      /^YouTube channels API error 403: forbidden_by_policy$/,
+    );
+  });
+
+  it("says so when the body is empty", async () => {
+    vi.stubGlobal("fetch", failWith(404, "  \n"));
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      /^YouTube channels API error 404: \(empty response body\)$/,
+    );
+  });
+
+  it("still reports the status when the body cannot be read", async () => {
+    vi.stubGlobal("fetch", failWith(500, async () => { throw new Error("terminated"); }));
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      /^YouTube channels API error 500: \(response body unreadable\)$/,
+    );
+  });
+});

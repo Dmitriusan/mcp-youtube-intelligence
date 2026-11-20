@@ -59,7 +59,65 @@ function describeConnectionError(err: unknown): string {
     rootMessage && code && !rootMessage.includes(code) ? `${code} ${rootMessage}`
     : rootMessage || code || ownMessage || String(err);
   // The API key rides in the request URL (?key=...) and some runtimes echo the URL in an error.
-  return summarizeFailure(detail.replace(/([?&]key=)[^&\s"']*/gi, "$1[redacted]"));
+  return summarizeFailure(redactKeyParam(detail));
+}
+
+// A failed response's body, as one short line for an error message. Real bodies are verbose: Google's
+// invalid-key error is ~900 characters of pretty-printed JSON saying one sentence three times, and a
+// gateway in front of an API answers with a whole HTML page. The message reaches an MCP client's model,
+// so keep the sentence and the machine-readable code (Apify's error.type, Google's ErrorInfo reason or
+// errors[].reason) and drop the rest.
+function describeErrorBody(body: string): string {
+  const text = body.trim();
+  if (!text) return "(empty response body)";
+  let detail = "";
+  try {
+    const error = (JSON.parse(text) as { error?: unknown } | null)?.error;
+    if (typeof error === "string") {
+      detail = error;
+    } else if (typeof error === "object" && error !== null) {
+      const { message, type, details, errors } = error as {
+        message?: unknown; type?: unknown; details?: unknown; errors?: unknown;
+      };
+      if (typeof message === "string" && message.trim()) {
+        const reasonOf = (list: unknown): string | undefined =>
+          (Array.isArray(list) ? (list as Array<{ reason?: unknown }>) : [])
+            .map((entry) => entry?.reason)
+            .find((r): r is string => typeof r === "string" && r !== "");
+        const code = (typeof type === "string" && type) || reasonOf(details) || reasonOf(errors);
+        const sentence = stripMarkup(message);
+        detail = code && !sentence.includes(code) ? `${sentence} (${code})` : sentence;
+      }
+    }
+  } catch {
+    // Not JSON — treated as plain text or markup below.
+  }
+  return summarizeFailure(redactKeyParam(detail || stripMarkup(text)));
+}
+
+// Tags are only stripped from something that is markup, so a plain-text body such as "x < y" is left alone.
+function stripMarkup(text: string): string {
+  if (!/<\/?[a-z][^>]*>/i.test(text)) return text;
+  // Inline tags vanish ("<a>quota</a>." stays "quota."); every other tag becomes a space so that
+  // "<h1>502</h1><p>nginx</p>" does not run together.
+  return text
+    .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<\/?(?:a|b|i|u|em|strong|span|code|small|font)\b[^>]*>/gi, "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+}
+
+function redactKeyParam(text: string): string {
+  return text.replace(/([?&]key=)[^&\s"']*/gi, "$1[redacted]");
+}
+
+async function readErrorBody(resp: Response): Promise<string> {
+  try {
+    return describeErrorBody(await resp.text());
+  } catch {
+    return "(response body unreadable)";
+  }
 }
 
 // A 2xx status does not guarantee a parseable (or expected-shape) JSON body —
@@ -246,7 +304,7 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
     } else if (!searchResp.ok && searchResp.status >= 500) {
       searchResp = await fetchSearch();
     }
-    if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}: ${await searchResp.text()}`);
+    if (!searchResp.ok) throw new Error(`YouTube search API error ${searchResp.status}: ${await readErrorBody(searchResp)}`);
     const searchData = await parseJsonResponse<YtApiResponse>(searchResp, "YouTube search API");
     // Same guard as the handle/channel_id path below and getRecentVideoIds: Google APIs
     // sometimes embed a quota/permission failure in a 200 body instead of the HTTP status.
@@ -277,7 +335,7 @@ export async function resolveChannel(input: string, apiKey: string): Promise<Cha
   } else if (!resp.ok && resp.status >= 500) {
     resp = await fetchChannel();
   }
-  if (!resp.ok) throw new Error(`YouTube channels API error ${resp.status}: ${await resp.text()}`);
+  if (!resp.ok) throw new Error(`YouTube channels API error ${resp.status}: ${await readErrorBody(resp)}`);
   const data = await parseJsonResponse<YtApiResponse>(resp, "YouTube channels API");
 
   if (data.error) throw new Error(`YouTube API: ${data.error.message}`);
@@ -328,7 +386,7 @@ export async function getRecentVideoIds(
   } else if (!resp.ok && resp.status >= 500) {
     resp = await fetchPlaylistItems();
   }
-  if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}: ${await resp.text()}`);
+  if (!resp.ok) throw new Error(`YouTube playlistItems API error ${resp.status}: ${await readErrorBody(resp)}`);
   const data = await parseJsonResponse<YtApiResponse>(resp, "YouTube playlistItems API");
   // Google APIs usually mirror an API-level error into the HTTP status, but not
   // always (e.g. some quota/permission failures land in the body of a 200) —
@@ -383,7 +441,7 @@ export async function runApifyTranscriptScraper(
     runResp = await startRun();
   }
   if (!runResp.ok) {
-    throw new Error(`Apify start run failed ${runResp.status}: ${await runResp.text()}`);
+    throw new Error(`Apify start run failed ${runResp.status}: ${await readErrorBody(runResp)}`);
   }
   const runBody = await parseJsonResponse<{ data?: Partial<ApifyRunData> }>(runResp, "Apify start run");
   if (!runBody.data?.id || !runBody.data?.defaultDatasetId) {
@@ -412,7 +470,7 @@ export async function runApifyTranscriptScraper(
       // polling to timeout. 429 is the exception: Apify's own rate limit, which the
       // next scheduled poll (APIFY_POLL_INTERVAL_MS later) already backs off past.
       if (statusResp.status >= 400 && statusResp.status < 500 && statusResp.status !== 429) {
-        throw new Error(`Apify poll error ${statusResp.status} for run ${runId}: ${await statusResp.text()}`);
+        throw new Error(`Apify poll error ${statusResp.status} for run ${runId}: ${await readErrorBody(statusResp)}`);
       }
       continue; // 5xx, 429, or network transient — keep polling
     }
@@ -457,7 +515,7 @@ export async function runApifyTranscriptScraper(
   } else if (!itemsResp.ok && (itemsResp.status >= 500 || itemsResp.status === 429)) {
     itemsResp = await fetchItems();
   }
-  if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}: ${await itemsResp.text()}`);
+  if (!itemsResp.ok) throw new Error(`Apify dataset fetch failed ${itemsResp.status}: ${await readErrorBody(itemsResp)}`);
   const items = await parseJsonResponse<unknown>(itemsResp, "Apify dataset fetch");
   if (!Array.isArray(items)) {
     throw new Error(`Apify dataset fetch: expected an array of items, got ${typeof items}`);
