@@ -3217,3 +3217,125 @@ describe("analyzeChannel (no captions returned)", () => {
     expect(result.note).not.toContain("none returned a transcript");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Connection failures — the message names the service and the reason
+// ---------------------------------------------------------------------------
+// Node's fetch rejects with a bare TypeError("fetch failed") and keeps the reason (ENOTFOUND,
+// ECONNRESET, a TLS error) on `cause`. The tool result is read by an MCP client's model, which
+// cannot see this server's stderr, so "fetch failed" left it unable to tell which service was
+// unreachable or whether to retry, check the network, or fix a proxy.
+describe("connection failures name the service and the reason", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function fetchFailed(causeCode?: string, causeMessage?: string): TypeError {
+    const err = new TypeError("fetch failed");
+    if (causeCode || causeMessage) {
+      (err as { cause?: unknown }).cause = Object.assign(new Error(causeMessage ?? causeCode), {
+        ...(causeCode ? { code: causeCode } : {}),
+      });
+    }
+    return err;
+  }
+
+  it("says which YouTube call failed and why, instead of a bare 'fetch failed'", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(
+      fetchFailed("ENOTFOUND", "getaddrinfo ENOTFOUND www.googleapis.com"),
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      "YouTube channels API request failed: getaddrinfo ENOTFOUND www.googleapis.com",
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(2); // the one-shot retry still runs
+  });
+
+  it("falls back to the error code when the cause has no message of its own", async () => {
+    const cause = Object.assign(new Error(""), { code: "ECONNRESET" });
+    const err = Object.assign(new TypeError("fetch failed"), { cause });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(err));
+
+    await expect(getRecentVideoIds("PLtest1234", 3, "test-api-key")).rejects.toThrow(
+      "YouTube playlistItems API request failed: ECONNRESET",
+    );
+  });
+
+  it("uses the error's own message when there is no cause", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("socket hang up")));
+
+    await expect(getRecentVideoIds("PLtest1234", 3, "test-api-key")).rejects.toThrow(
+      "YouTube playlistItems API request failed: socket hang up",
+    );
+  });
+
+  it("labels an Apify start-run failure too, and keeps the original error as the cause", async () => {
+    const original = fetchFailed("ETIMEDOUT", "connect ETIMEDOUT 1.2.3.4:443");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(original));
+
+    const failure = await runApifyTranscriptScraper(["https://www.youtube.com/watch?v=abc"], "apify-token")
+      .catch((e: unknown) => e as Error);
+
+    expect(failure.message).toBe("Apify start run request failed: connect ETIMEDOUT 1.2.3.4:443");
+    expect(failure.cause).toBe(original);
+  });
+
+  it("copes with a rejection that is not an Error object", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue("boom"));
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      "YouTube channels API request failed: boom",
+    );
+  });
+
+  it("never lets the API key through, even when the runtime echoes the request URL", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(
+        new TypeError(
+          "Failed to parse URL from https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=%40x&key=SECRET-KEY-123&alt=json",
+        ),
+      ),
+    );
+
+    const failure = await resolveChannel("@testchannel", "SECRET-KEY-123").catch((e: unknown) => e as Error);
+
+    expect(failure.message).toContain("YouTube channels API request failed");
+    expect(failure.message).not.toContain("SECRET-KEY-123");
+    expect(failure.message).toContain("key=[redacted]");
+  });
+
+  it("keeps the cause to one short line", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error(`line one\nline two ${"x".repeat(1000)}`)));
+
+    const failure = await resolveChannel("@testchannel", "test-api-key").catch((e: unknown) => e as Error);
+
+    expect(failure.message).not.toContain("\n");
+    expect(failure.message.length).toBeLessThan(400);
+  });
+
+  it("reports a timeout as a timeout, as before", async () => {
+    const timeout = Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(timeout));
+
+    await expect(resolveChannel("@testchannel", "test-api-key")).rejects.toThrow(
+      "YouTube channels API timed out after 30s",
+    );
+  });
+
+  it("carries the reason out of extractTopicsWithLLM when every Gemini call fails to connect", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(fetchFailed("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:443")),
+    );
+
+    await expect(
+      extractTopicsWithLLM(
+        [{ videoDetails: { videoId: "vid001" }, transcript: [{ text: "kubernetes deployment" }] }],
+        "gemini-key",
+      ),
+    ).rejects.toThrow("Gemini API request failed: connect ECONNREFUSED 127.0.0.1:443");
+  });
+});

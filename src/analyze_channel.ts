@@ -42,8 +42,24 @@ async function fetchWithTimeout(url: string, options: RequestInit, label: string
     if (err instanceof Error && err.name === "TimeoutError") {
       throw new Error(`${label} timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
     }
-    throw err;
+    // Node's fetch rejects with a bare TypeError("fetch failed") and keeps the reason (ENOTFOUND,
+    // ECONNRESET, a TLS error) on `cause`. The message reaches an MCP client's model that cannot see
+    // stderr, so name the service and the reason here instead of passing "fetch failed" through.
+    throw new Error(`${label} request failed: ${describeConnectionError(err)}`, { cause: err });
   }
+}
+
+function describeConnectionError(err: unknown): string {
+  const outer = err as { message?: unknown; cause?: unknown } | null | undefined;
+  const root = (outer?.cause ?? outer) as { code?: unknown; message?: unknown } | string | null | undefined;
+  const code = typeof root === "object" && root !== null && typeof root.code === "string" ? root.code : "";
+  const rootMessage = typeof root === "object" && root !== null && typeof root.message === "string" ? root.message : "";
+  const ownMessage = typeof outer?.message === "string" ? outer.message : "";
+  const detail =
+    rootMessage && code && !rootMessage.includes(code) ? `${code} ${rootMessage}`
+    : rootMessage || code || ownMessage || String(err);
+  // The API key rides in the request URL (?key=...) and some runtimes echo the URL in an error.
+  return summarizeFailure(detail.replace(/([?&]key=)[^&\s"']*/gi, "$1[redacted]"));
 }
 
 // A 2xx status does not guarantee a parseable (or expected-shape) JSON body —
