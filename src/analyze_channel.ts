@@ -137,6 +137,25 @@ export function getGeminiApiKey(): string {
 // Channel URL / handle parser
 // ---------------------------------------------------------------------------
 
+// A browser address bar copies a non-ASCII handle percent-encoded; a malformed sequence
+// stays as typed (and then fails the pattern below) instead of throwing a URIError.
+function safeDecode(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+// Handles may contain letters, marks and digits of any script (live API: @фокусхплаза,
+// @hikakinヒカキン公式), plus _ - . and the Latin middle dot. An ASCII-only pattern cut such a
+// handle at its first non-ASCII letter, so a pasted URL silently resolved the ASCII prefix —
+// a different channel. Identical to the old [\w.-] for ASCII input.
+const HANDLE_BODY = "[\\p{L}\\p{M}\\p{N}_.\\-\\u00B7]+";
+const BARE_HANDLE = new RegExp(`^@${HANDLE_BODY}$`, "u");
+const HANDLE_PREFIX = new RegExp(`^@${HANDLE_BODY}`, "u");
+const CUSTOM_NAME_PREFIX = /^[\p{L}\p{M}\p{N}_-]+/u;
+
 export function parseChannelInput(input: string): ParsedChannel {
   const trimmed = input.trim();
 
@@ -144,12 +163,17 @@ export function parseChannelInput(input: string): ParsedChannel {
     throw new Error("channel_url must not be empty.");
   }
 
-  // Bare @handle — e.g. @fireship or @web.dev (periods allowed in handles)
-  if (/^@[\w.-]+$/.test(trimmed)) return { type: "handle", value: trimmed };
+  // Bare @handle — e.g. @fireship, @web.dev (periods allowed) or @фокусхплаза (any script)
+  const bareHandle = safeDecode(trimmed);
+  if (BARE_HANDLE.test(bareHandle)) return { type: "handle", value: bareHandle };
 
-  // Full URL with @handle — youtube.com/@fireship or youtube.com/@web.dev/videos
-  const handleFromUrl = trimmed.match(/youtube\.com\/@([\w.-]+)/);
-  if (handleFromUrl) return { type: "handle", value: `@${handleFromUrl[1]}` };
+  // Full URL with @handle — youtube.com/@fireship or youtube.com/@web.dev/videos. Take the whole
+  // path segment, decode it, then keep its leading handle characters.
+  const handleSegment = trimmed.match(/youtube\.com\/(@[^/?#\s]+)/);
+  if (handleSegment) {
+    const handle = safeDecode(handleSegment[1]).match(HANDLE_PREFIX);
+    if (handle) return { type: "handle", value: handle[0] };
+  }
 
   // /channel/UC... URL
   const channelIdFromUrl = trimmed.match(/\/channel\/(UC[\w-]{22})/);
@@ -158,9 +182,12 @@ export function parseChannelInput(input: string): ParsedChannel {
   // Bare UC... channel ID (24 chars: "UC" + 22)
   if (/^UC[\w-]{22}$/.test(trimmed)) return { type: "channel_id", value: trimmed };
 
-  // Legacy /c/name or /user/name URL
-  const customFromUrl = trimmed.match(/youtube\.com\/(?:c|user)\/([\w-]+)/);
-  if (customFromUrl) return { type: "custom_url", value: customFromUrl[1] };
+  // Legacy /c/name or /user/name URL (the name can be non-ASCII and percent-encoded too)
+  const customSegment = trimmed.match(/youtube\.com\/(?:c|user)\/([^/?#\s]+)/);
+  if (customSegment) {
+    const custom = safeDecode(customSegment[1]).match(CUSTOM_NAME_PREFIX);
+    if (custom) return { type: "custom_url", value: custom[0] };
+  }
 
   throw new Error(
     `Cannot parse YouTube channel from: "${input}". ` +

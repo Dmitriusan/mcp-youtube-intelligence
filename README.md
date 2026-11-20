@@ -71,8 +71,9 @@ Add to your Claude Desktop / MCP client config:
 
 ```
 channel_url: YouTube channel URL or @handle. Accepts:
-               - @handle (e.g. @fireship)
-               - full URL with handle (e.g. youtube.com/@fireship)
+               - @handle (e.g. @fireship; handles in any script work, e.g. @фокусхплаза)
+               - full URL with handle (e.g. youtube.com/@fireship; a percent-encoded
+                 non-ASCII handle copied from a browser address bar is decoded)
                - /channel/UC... URL
                - bare 24-character UC... channel ID
                - legacy /c/name or /user/name URL

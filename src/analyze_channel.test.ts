@@ -111,6 +111,70 @@ describe("parseChannelInput", () => {
   it("throws a specific error for whitespace-only input", () => {
     expect(() => parseChannelInput("   ")).toThrow(/channel_url must not be empty/);
   });
+
+  // YouTube issues handles with non-ASCII letters (checked against the live API: @фокусхплаза,
+  // @hikakinヒカキン公式). An ASCII-only handle pattern cut such a handle at its first
+  // non-ASCII letter, so a pasted URL resolved a *different* channel (@hikakin) with no error.
+  describe("handles with non-ASCII letters", () => {
+    it("parses a bare non-Latin @handle", () => {
+      expect(parseChannelInput("@фокусхплаза")).toEqual({ type: "handle", value: "@фокусхплаза" });
+    });
+
+    it("keeps the whole handle when ASCII and non-ASCII letters are mixed, not its ASCII prefix", () => {
+      expect(parseChannelInput("@hikakinヒカキン公式")).toEqual({
+        type: "handle",
+        value: "@hikakinヒカキン公式",
+      });
+      expect(parseChannelInput("https://www.youtube.com/@hikakinヒカキン公式/videos")).toEqual({
+        type: "handle",
+        value: "@hikakinヒカキン公式",
+      });
+    });
+
+    it("does not turn youtube.com/@Fußball into the handle @Fu", () => {
+      expect(parseChannelInput("https://www.youtube.com/@Fußball")).toEqual({
+        type: "handle",
+        value: "@Fußball",
+      });
+    });
+
+    it("decodes a percent-encoded handle as copied from a browser address bar", () => {
+      const encoded = encodeURIComponent("фокусхплаза");
+      expect(parseChannelInput(`https://www.youtube.com/@${encoded}`)).toEqual({
+        type: "handle",
+        value: "@фокусхплаза",
+      });
+      expect(parseChannelInput(`https://www.youtube.com/@${encoded}/videos?si=abc`)).toEqual({
+        type: "handle",
+        value: "@фокусхплаза",
+      });
+      expect(parseChannelInput(`@${encoded}`)).toEqual({ type: "handle", value: "@фокусхплаза" });
+    });
+
+    it("parses a non-ASCII legacy /c/ name, percent-encoded or not", () => {
+      expect(parseChannelInput("https://www.youtube.com/c/Фокус")).toEqual({
+        type: "custom_url",
+        value: "Фокус",
+      });
+      expect(parseChannelInput(`https://www.youtube.com/c/${encodeURIComponent("Фокус")}`)).toEqual({
+        type: "custom_url",
+        value: "Фокус",
+      });
+    });
+
+    it("rejects a malformed percent sequence with the usual error instead of a URIError", () => {
+      expect(() => parseChannelInput("https://www.youtube.com/@%E0%A4%A")).toThrow(
+        /Cannot parse YouTube channel/,
+      );
+    });
+
+    it("still rejects an @ followed only by characters that cannot be in a handle", () => {
+      expect(() => parseChannelInput("@!!!")).toThrow(/Cannot parse YouTube channel/);
+      expect(() => parseChannelInput("https://www.youtube.com/@/videos")).toThrow(
+        /Cannot parse YouTube channel/,
+      );
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
