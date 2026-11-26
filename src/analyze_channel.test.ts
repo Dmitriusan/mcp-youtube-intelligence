@@ -3522,3 +3522,128 @@ describe("error bodies are condensed to one readable line", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// extractTopicsWithLLM — stop asking Gemini once it has clearly stopped answering
+// ---------------------------------------------------------------------------
+describe("extractTopicsWithLLM (outage limit)", () => {
+  const videos = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      videoDetails: { videoId: `vid${String(i + 1).padStart(3, "0")}` },
+      transcript: [{ text: `content about topic number ${i + 1}` }],
+    }));
+  const answer = (theme: string) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ theme, entities: [], tags: ["x"] }) }] } }],
+    }),
+  });
+  const timeout = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  const refused = (status: number) => ({ ok: false, status, text: async () => "Resource exhausted" });
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("gives up after three videos in a row that Gemini never answered, instead of waiting out all of them", async () => {
+    // Each timeout is 30 s in real life: 50 videos would hold the tool call for 25 minutes.
+    const mockFetch = vi.fn().mockRejectedValue(timeout());
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(extractTopicsWithLLM(videos(50), "test-key")).rejects.toThrow(/Gemini API timed out after 30s/);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up after three videos in a row refused with 429, and keeps what it already had", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce(answer("First"))
+      .mockResolvedValueOnce(answer("Second"))
+      .mockResolvedValue(refused(429)); // every later call, retries included
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await extractTopicsWithLLM(videos(10), "test-key");
+
+    expect(result.map((r) => r.theme)).toEqual(["First", "Second"]);
+    // 2 answered + 3 refused videos x (first try + the one retry) = 8; the other 5 videos were never sent
+    expect(mockFetch).toHaveBeenCalledTimes(8);
+  });
+
+  it("counts a 5xx that survives the retry the same way", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(refused(503));
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(extractTopicsWithLLM(videos(10), "test-key")).rejects.toThrow(/Gemini API error 503/);
+    expect(mockFetch).toHaveBeenCalledTimes(6);
+  });
+
+  it("does not give up while Gemini answers in between: two failures, an answer, two failures, an answer", async () => {
+    const mockFetch = vi.fn()
+      .mockRejectedValueOnce(timeout())
+      .mockRejectedValueOnce(timeout())
+      .mockResolvedValueOnce(answer("Third"))
+      .mockRejectedValueOnce(timeout())
+      .mockRejectedValueOnce(timeout())
+      .mockResolvedValueOnce(answer("Sixth"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await extractTopicsWithLLM(videos(6), "test-key");
+
+    expect(result.map((r) => r.theme)).toEqual(["Third", "Sixth"]);
+    expect(mockFetch).toHaveBeenCalledTimes(6);
+  });
+
+  it("does not count a 4xx about one video, or a 200 with nothing usable, as Gemini being down", async () => {
+    // Both prove the service is reachable, so they must not end the run.
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 400, text: async () => "Content policy violation" })
+      .mockResolvedValueOnce({ ok: false, status: 400, text: async () => "Content policy violation" })
+      .mockResolvedValueOnce({ ok: false, status: 400, text: async () => "Content policy violation" })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ promptFeedback: { blockReason: "SAFETY" } }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ promptFeedback: { blockReason: "SAFETY" } }) })
+      .mockResolvedValueOnce(answer("Sixth"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await extractTopicsWithLLM(videos(6), "test-key");
+
+    expect(result.map((r) => r.theme)).toEqual(["Sixth"]);
+    expect(mockFetch).toHaveBeenCalledTimes(6);
+  });
+
+  it("a refusal that the retry gets past is not an outage", async () => {
+    // 429 then a good answer, three videos running: each video recovered on its retry.
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce(refused(429)).mockResolvedValueOnce(answer("One"))
+      .mockResolvedValueOnce(refused(429)).mockResolvedValueOnce(answer("Two"))
+      .mockResolvedValueOnce(refused(429)).mockResolvedValueOnce(answer("Three"))
+      .mockResolvedValueOnce(answer("Four"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await extractTopicsWithLLM(videos(4), "test-key");
+
+    expect(result.map((r) => r.theme)).toEqual(["One", "Two", "Three", "Four"]);
+  });
+
+  it("does not let videos without transcript text count toward the limit", async () => {
+    const withBlanks = [
+      ...videos(2),
+      { videoDetails: { videoId: "blank1" }, transcript: [] },
+      { videoDetails: { videoId: "blank2" }, transcript: [{ text: "  " }] },
+      { videoDetails: { videoId: "vid003" }, transcript: [{ text: "third real video" }] },
+    ];
+    const mockFetch = vi.fn()
+      .mockRejectedValueOnce(timeout())
+      .mockRejectedValueOnce(timeout())
+      .mockResolvedValueOnce(answer("Last"));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await extractTopicsWithLLM(withBlanks, "test-key");
+
+    expect(result.map((r) => r.theme)).toEqual(["Last"]);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+});

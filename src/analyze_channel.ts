@@ -30,6 +30,11 @@ const DEFAULT_OUTPUT_DIR = "./output/";
 const MAX_VIDEOS = 50;
 const FETCH_TIMEOUT_MS = 30_000; // bound every outbound request so a stalled external API can't hang the tool call indefinitely
 const NOTE_CAUSE_MAX_CHARS = 200; // cap on a failure cause quoted in the result's `note`
+// Gemini is asked once per video, in sequence. When it never answers (timeouts, connection failures) or
+// keeps refusing (429/5xx after the retry), every remaining video would fail the same way: with the 30 s
+// timeout that is 25 minutes for max_videos=50, far past any MCP client's tool timeout, and on a
+// rate-limited key it spends the whole quota on doomed calls. Stop after this many videos in a row.
+const GEMINI_MAX_CONSECUTIVE_OUTAGES = 3;
 
 // ---------------------------------------------------------------------------
 // Fetch helper
@@ -644,6 +649,7 @@ export async function extractTopicsWithLLM(
   const results: TopicStructured[] = [];
   let attempted = 0;
   let lastRequestError: string | undefined;
+  let consecutiveOutages = 0;
 
   for (const item of transcriptItems) {
     const record = item as Record<string, unknown>;
@@ -658,6 +664,13 @@ export async function extractTopicsWithLLM(
       rawText = snippets;
     }
     if (!rawText.trim()) continue;
+
+    if (consecutiveOutages >= GEMINI_MAX_CONSECUTIVE_OUTAGES) {
+      console.warn(
+        `[analyze_channel] Gemini failed ${consecutiveOutages} videos in a row, skipping the remaining videos: ${lastRequestError}`,
+      );
+      break;
+    }
 
     // Truncate to limit Gemini input tokens
     const words = rawText.split(/\s+/);
@@ -692,21 +705,8 @@ ${truncated}`;
 
     attempted++;
     try {
-      let resp = await fetchWithTimeout(
-        `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestBody),
-        },
-        "Gemini API",
-      );
-
-      // Retry once on transient failures: 5xx (Gemini 503 overloaded is common) or 429
-      // (rate limit) — both are worth a single backoff-free retry rather than discarding
-      // this video's topics outright.
-      if (!resp.ok && (resp.status >= 500 || resp.status === 429)) {
-        resp = await fetchWithTimeout(
+      const askGemini = () =>
+        fetchWithTimeout(
           `${GEMINI_API_BASE}/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
           {
             method: "POST",
@@ -715,7 +715,22 @@ ${truncated}`;
           },
           "Gemini API",
         );
+      let resp: Response;
+      try {
+        resp = await askGemini();
+        // Retry once on transient failures: 5xx (Gemini 503 overloaded is common) or 429
+        // (rate limit) — both are worth a single backoff-free retry rather than discarding
+        // this video's topics outright.
+        if (!resp.ok && (resp.status >= 500 || resp.status === 429)) resp = await askGemini();
+      } catch (err) {
+        // No answer at all (timeout, connection failure): counts toward the outage limit.
+        consecutiveOutages++;
+        throw err;
       }
+      // A 429 or 5xx that survived the retry means Gemini is down or refusing this key. Any other
+      // answer — a 4xx about this one video, or a 200 with nothing usable in it — shows the service
+      // is reachable, so those do not count, and a reachable answer ends the streak.
+      consecutiveOutages = !resp.ok && (resp.status >= 500 || resp.status === 429) ? consecutiveOutages + 1 : 0;
 
       if (!resp.ok) {
         const { message, reason } = parseGoogleError(await resp.text());
