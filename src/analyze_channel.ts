@@ -890,6 +890,25 @@ function summarizeFailure(message: string, secret?: string): string {
   return oneLine.length > NOTE_CAUSE_MAX_CHARS ? `${oneLine.slice(0, NOTE_CAUSE_MAX_CHARS)}…` : oneLine;
 }
 
+// Both keys are required, and a first-time setup is the likeliest time for both to be missing. Name every
+// missing one in a single error: reporting only the first made the caller fix them one round trip at a
+// time. With a single key missing the message is exactly the getter's own.
+function requireCredentials(): { apifyToken: string; youtubeApiKey: string } {
+  const problems: string[] = [];
+  const read = (getKey: () => string): string => {
+    try {
+      return getKey();
+    } catch (err) {
+      problems.push(err instanceof Error ? err.message : String(err));
+      return "";
+    }
+  };
+  const apifyToken = read(getApifyToken);
+  const youtubeApiKey = read(getYouTubeApiKey);
+  if (problems.length) throw new Error(problems.join(" "));
+  return { apifyToken, youtubeApiKey };
+}
+
 export async function analyzeChannel(
   channelInput: string,
   maxVideos: number,
@@ -897,8 +916,7 @@ export async function analyzeChannel(
   if (maxVideos < 1) throw new Error(`max_videos must be at least 1, got ${maxVideos}`);
   const clampedMaxVideos = Math.min(maxVideos, MAX_VIDEOS);
 
-  const apifyToken = getApifyToken();
-  const youtubeApiKey = getYouTubeApiKey();
+  const { apifyToken, youtubeApiKey } = requireCredentials();
 
   // Step 1: Resolve channel URL/handle → ID + uploads playlist
   const channel = await resolveChannel(channelInput, youtubeApiKey);

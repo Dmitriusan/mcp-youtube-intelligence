@@ -19,6 +19,8 @@ You need API keys for three services:
 | `APIFY_TOKEN` | [Apify Console](https://console.apify.com/) → Account → Integrations → API token |
 | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) → Get API key |
 
+`YOUTUBE_API_KEY` and `APIFY_TOKEN` are required: without them `analyze_channel` fails before sending any request, and the error names every key that is missing.
+
 `GEMINI_API_KEY` is optional — if omitted, the tool falls back to word-frequency topic extraction instead of semantic analysis. The same fallback applies when a configured Gemini call fails (invalid key, exhausted quota, blocked content); the result's `note` says why.
 
 **Optional**

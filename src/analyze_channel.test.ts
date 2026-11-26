@@ -3879,3 +3879,58 @@ describe("analyzeChannel (note says when topics_structured is incomplete)", () =
     expect(result.note).not.toContain("incomplete");
   });
 });
+
+// ---------------------------------------------------------------------------
+// analyzeChannel — missing credentials are all named in one error
+// ---------------------------------------------------------------------------
+describe("analyzeChannel (missing credentials)", () => {
+  const missingFile = () => {
+    throw new Error("ENOENT");
+  };
+
+  beforeEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    vi.restoreAllMocks();
+  });
+
+  it("names both keys when both are missing, so one fix round is enough", async () => {
+    // One mocked read per key: the lookups fall through to the Corp secrets file, which must not
+    // supply a key on a machine that has one.
+    vi.mocked(readFileSync).mockImplementationOnce(missingFile).mockImplementationOnce(missingFile);
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+
+    const failure = await analyzeChannel("@techchannel", 1).catch((err: Error) => err);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("APIFY_TOKEN not configured");
+    expect((failure as Error).message).toContain("YOUTUBE_API_KEY not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("names only the Apify token when that is the one missing, with the getter's own message", async () => {
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+    vi.mocked(readFileSync).mockImplementationOnce(missingFile);
+    vi.stubGlobal("fetch", vi.fn());
+
+    await expect(analyzeChannel("@techchannel", 1)).rejects.toThrow(
+      /^APIFY_TOKEN not configured\. Set env var APIFY_TOKEN or ensure secrets\/apify\.env exists\.$/,
+    );
+  });
+
+  it("names only the YouTube key when that is the one missing, with the getter's own message", async () => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    vi.mocked(readFileSync).mockImplementationOnce(missingFile);
+    vi.stubGlobal("fetch", vi.fn());
+
+    await expect(analyzeChannel("@techchannel", 1)).rejects.toThrow(
+      /^YOUTUBE_API_KEY not configured\. Set env var YOUTUBE_API_KEY or ensure secrets\/google-cloud\.env exists\.$/,
+    );
+  });
+});
