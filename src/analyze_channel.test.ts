@@ -14,6 +14,7 @@ import {
   getGeminiApiKey,
   TRANSCRIPT_ACTOR_ID,
   type AnalyzeChannelResult,
+  type GeminiRunReport,
 } from "./analyze_channel.js";
 
 // Mock fs: mkdirSync/writeFileSync are no-ops (persistence side-effect suppressed);
@@ -3645,5 +3646,236 @@ describe("extractTopicsWithLLM (outage limit)", () => {
 
     expect(result.map((r) => r.theme)).toEqual(["Last"]);
     expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractTopicsWithLLM / analyzeChannel — a partly successful Gemini run says what is missing
+// ---------------------------------------------------------------------------
+describe("extractTopicsWithLLM (run report)", () => {
+  const video = (n: number, text = `content about topic number ${n}`) => ({
+    videoDetails: { videoId: `vid${String(n).padStart(3, "0")}` },
+    transcript: [{ text }],
+  });
+  const answer = (theme: string) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ theme, entities: [], tags: ["x"] }) }] } }],
+    }),
+  });
+  const badJson = {
+    ok: true,
+    status: 200,
+    json: async () => ({ candidates: [{ content: { parts: [{ text: "not-valid-json{{" }] } }] }),
+  };
+  const refused = (status: number, body = "Resource exhausted") => ({ ok: false, status, text: async () => body });
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reports nothing skipped when every video got a result", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(answer("One")).mockResolvedValueOnce(answer("Two")));
+    const report: GeminiRunReport = { skipped: -1, stoppedEarly: true };
+
+    await extractTopicsWithLLM([video(1), video(2)], "test-key", report);
+
+    expect(report).toEqual({ skipped: 0, lastError: undefined, stoppedEarly: false });
+  });
+
+  it("counts a video Gemini gave nothing usable for, and names the cause", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(answer("One")).mockResolvedValueOnce(badJson).mockResolvedValueOnce(answer("Three")));
+    const report: GeminiRunReport = { skipped: 0, stoppedEarly: false };
+
+    const result = await extractTopicsWithLLM([video(1), video(2), video(3)], "test-key", report);
+
+    expect(result).toHaveLength(2);
+    expect(report.skipped).toBe(1);
+    expect(report.lastError).toBe("Gemini returned unparseable JSON for video vid002");
+    expect(report.stoppedEarly).toBe(false);
+  });
+
+  it("does not count a video that has no transcript text as skipped", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(answer("One")));
+    const report: GeminiRunReport = { skipped: 0, stoppedEarly: false };
+
+    await extractTopicsWithLLM([video(1), { videoDetails: { videoId: "blank" }, transcript: [] }, video(3, "   ")], "test-key", report);
+
+    expect(report.skipped).toBe(0);
+  });
+
+  it("counts the videos it never asked about once the outage limit stops the run", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce(answer("One")).mockResolvedValue(refused(429));
+    vi.stubGlobal("fetch", mockFetch);
+    const report: GeminiRunReport = { skipped: 0, stoppedEarly: false };
+
+    const result = await extractTopicsWithLLM(Array.from({ length: 10 }, (_, i) => video(i + 1)), "test-key", report);
+
+    expect(result).toHaveLength(1);
+    expect(report.skipped).toBe(9); // 3 refused, 6 never sent
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.lastError).toBe("Gemini API error 429: Resource exhausted");
+  });
+
+  it("counts the videos left over when a bad key ends the run midway", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(answer("One")).mockResolvedValueOnce(answer("Two")).mockResolvedValueOnce(refused(403, "Permission denied")),
+    );
+    const report: GeminiRunReport = { skipped: 0, stoppedEarly: false };
+
+    const result = await extractTopicsWithLLM(Array.from({ length: 5 }, (_, i) => video(i + 1)), "test-key", report);
+
+    expect(result).toHaveLength(2);
+    expect(report.skipped).toBe(3);
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.lastError).toBe("Gemini API error 403: Permission denied");
+  });
+
+  it("scrubs the API key out of the cause it reports", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(answer("One")).mockResolvedValueOnce(refused(400, "bad request near secret-key-123 in the URL")),
+    );
+    const report: GeminiRunReport = { skipped: 0, stoppedEarly: false };
+
+    await extractTopicsWithLLM([video(1), video(2)], "secret-key-123", report);
+
+    expect(report.lastError).toBe("Gemini API error 400: bad request near [redacted] in the URL");
+  });
+
+  it("still throws the total-failure error when no video got a result", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(badJson));
+    const report: GeminiRunReport = { skipped: 0, stoppedEarly: false };
+
+    await expect(extractTopicsWithLLM([video(1), video(2)], "test-key", report)).rejects.toThrow(/unparseable JSON for video vid002/);
+    expect(report.skipped).toBe(2);
+  });
+});
+
+describe("analyzeChannel (note says when topics_structured is incomplete)", () => {
+  beforeEach(() => {
+    process.env["APIFY_TOKEN"] = "test-apify-token";
+    process.env["YOUTUBE_API_KEY"] = "test-yt-key";
+    process.env["GEMINI_API_KEY"] = "test-gemini-key";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    delete process.env["APIFY_TOKEN"];
+    delete process.env["YOUTUBE_API_KEY"];
+    delete process.env["GEMINI_API_KEY"];
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const answer = (theme: string) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ theme, entities: [], tags: ["x"] }) }] } }],
+    }),
+  });
+  const refused429 = { ok: false, status: 429, text: async () => "Resource exhausted" };
+
+  // The five calls before Gemini, for `count` videos that all have transcripts.
+  function mockFetchUpToGemini(count: number) {
+    const ids = Array.from({ length: count }, (_, i) => `vid${String(i + 1).padStart(3, "0")}`);
+    const mockFetch = vi.fn();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            id: "UCtest1234567890ABCDE12",
+            snippet: { title: "Tech Channel" },
+            contentDetails: { relatedPlaylists: { uploads: "UUtest1234567890ABCDE12" } },
+          },
+        ],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: ids.map((videoId) => ({ contentDetails: { videoId } })) }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-001", defaultDatasetId: "ds-001", status: "RUNNING" } }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { id: "run-001", defaultDatasetId: "ds-001", status: "SUCCEEDED" } }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () =>
+        ids.map((videoId) => ({ videoDetails: { videoId }, transcript: [{ text: "javascript typescript programming node framework" }] })),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    return mockFetch;
+  }
+
+  async function runAnalyze(maxVideos: number) {
+    vi.useFakeTimers();
+    const resultPromise = analyzeChannel("@techchannel", maxVideos);
+    await vi.runAllTimersAsync();
+    return resultPromise;
+  }
+
+  it("says how many transcripts got no semantic result, and why", async () => {
+    const mockFetch = mockFetchUpToGemini(4);
+    mockFetch
+      .mockResolvedValueOnce(answer("One"))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ promptFeedback: { blockReason: "SAFETY" } }) })
+      .mockResolvedValueOnce(answer("Three"))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ promptFeedback: { blockReason: "SAFETY" } }) });
+
+    const result = await runAnalyze(4);
+
+    expect(result.topics_structured).toHaveLength(2);
+    expect(result.note).toContain("2 semantic topics (topics_structured) via Gemini");
+    expect(result.note).toContain("Gemini gave no result for 2 of the 4 transcript(s), so topics_structured is incomplete");
+    expect(result.note).toContain("last cause: Gemini returned no content for video vid004 (SAFETY)");
+    expect(result.note).not.toContain("not asked");
+  });
+
+  it("adds nothing when every transcript got a result", async () => {
+    const mockFetch = mockFetchUpToGemini(2);
+    mockFetch.mockResolvedValueOnce(answer("One")).mockResolvedValueOnce(answer("Two"));
+
+    const result = await runAnalyze(2);
+
+    expect(result.note).toBe(
+      "Analyzed 2 video(s), 2 with transcripts — 2 semantic topics (topics_structured) via Gemini, 5 keyword topics as supplemental.",
+    );
+  });
+
+  it("says Gemini was not asked about the rest when repeated failures stopped the run", async () => {
+    const mockFetch = mockFetchUpToGemini(8);
+    mockFetch.mockResolvedValueOnce(answer("One")).mockResolvedValue(refused429);
+
+    const result = await runAnalyze(8);
+
+    expect(result.topics_structured).toHaveLength(1);
+    expect(result.note).toContain("Gemini gave no result for 7 of the 8 transcript(s), so topics_structured is incomplete");
+    expect(result.note).toContain("last cause: Gemini API error 429: Resource exhausted");
+    expect(result.note).toContain("Gemini was not asked about the remaining videos after repeated failures");
+    expect(result.note).not.toContain("\n");
+  });
+
+  it("keeps the whole-run failure wording when no video got a result", async () => {
+    const mockFetch = mockFetchUpToGemini(3);
+    mockFetch.mockResolvedValue(refused429);
+
+    const result = await runAnalyze(3);
+
+    expect(result.topics_structured).toEqual([]);
+    expect(result.note).toContain("keyword topics only (Gemini extraction failed — Gemini API error 429: Resource exhausted)");
+    expect(result.note).not.toContain("incomplete");
   });
 });

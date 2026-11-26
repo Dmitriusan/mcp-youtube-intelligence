@@ -90,8 +90,8 @@ Returns a JSON object:
 | `videos_analyzed` | How many videos were fetched from the channel's uploads playlist |
 | `transcripts_available` | How many of those came back with caption content |
 | `topics` | Up to 20 top keywords by frequency across all transcripts. Always computed. Counts plain English words only: a word with an accented or non-Latin letter is skipped, so a transcript in another language gives few or no keywords here (`topics_structured` still works for it when Gemini is configured) |
-| `topics_structured` | Per video: `theme`, `entities[]`, `tags[]` from Gemini. Empty when Gemini is not configured or fails. Only the first 1,000 words of each transcript are sent, and a video Gemini blocks or returns nothing usable for is left out |
-| `note` | Which analysis mode ran. When Gemini was configured but failed, or when none of the videos returned a transcript (so there was nothing to analyze), it also says why |
+| `topics_structured` | Per video: `theme`, `entities[]`, `tags[]` from Gemini. Empty when Gemini is not configured or fails. Only the first 1,000 words of each transcript are sent, and a video Gemini blocks or returns nothing usable for is left out. After 3 videos in a row that Gemini never answers or keeps refusing (timeout, connection failure, 429 or 5xx after one retry) the remaining videos are not sent, so a rate-limited key or an unreachable Gemini costs seconds, not minutes |
+| `note` | Which analysis mode ran. When Gemini was configured but failed, or when none of the videos returned a transcript (so there was nothing to analyze), it also says why. When Gemini answered for some transcripts but not others, it says how many are missing from `topics_structured` and the most recent cause |
 | `output_path` | Where the JSON artifact was written. Absent if the write failed |
 
 **Example prompt:** "Analyze the @fireship YouTube channel and tell me what topics they cover most."

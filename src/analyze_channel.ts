@@ -642,33 +642,55 @@ function parseGoogleError(body: string): { message: string; reason?: string } {
   return { message: body.trim() };
 }
 
+// The caption text of one Apify item: its `transcript` is an array of {text} snippets or a plain string.
+function transcriptText(item: unknown): string {
+  const snippets = (item as Record<string, unknown>)["transcript"];
+  if (Array.isArray(snippets)) return snippets.map((s: unknown) => (s as Record<string, string>)["text"] ?? "").join(" ");
+  return typeof snippets === "string" ? snippets : "";
+}
+
+// What one extractTopicsWithLLM run left undone, for the caller to put in the result's note. Passed in
+// rather than returned so the function's return type stays the plain array it has always been.
+export interface GeminiRunReport {
+  /** Videos with transcript text that have no entry in the returned array. */
+  skipped: number;
+  /** The most recent failure behind a skip, as one short line with the API key scrubbed. */
+  lastError?: string;
+  /** The loop gave up (bad credentials, or repeated outages) before it reached the last video. */
+  stoppedEarly: boolean;
+}
+
 export async function extractTopicsWithLLM(
   transcriptItems: unknown[],
   geminiApiKey: string,
+  report?: GeminiRunReport,
 ): Promise<TopicStructured[]> {
   const results: TopicStructured[] = [];
   let attempted = 0;
   let lastRequestError: string | undefined;
   let consecutiveOutages = 0;
+  let stoppedEarly = false;
+
+  const fillReport = () => {
+    if (!report) return;
+    const withText = transcriptItems.filter((item) => transcriptText(item).trim()).length;
+    report.skipped = withText - results.length;
+    report.lastError = lastRequestError ? summarizeFailure(lastRequestError, geminiApiKey) : undefined;
+    report.stoppedEarly = stoppedEarly;
+  };
 
   for (const item of transcriptItems) {
-    const record = item as Record<string, unknown>;
-    const videoDetails = record["videoDetails"] as Record<string, string> | undefined;
+    const videoDetails = (item as Record<string, unknown>)["videoDetails"] as Record<string, string> | undefined;
     const videoId = videoDetails?.["videoId"] ?? "unknown";
 
-    const snippets = record["transcript"];
-    let rawText = "";
-    if (Array.isArray(snippets)) {
-      rawText = snippets.map((s: unknown) => (s as Record<string, string>)["text"] ?? "").join(" ");
-    } else if (typeof snippets === "string") {
-      rawText = snippets;
-    }
+    const rawText = transcriptText(item);
     if (!rawText.trim()) continue;
 
     if (consecutiveOutages >= GEMINI_MAX_CONSECUTIVE_OUTAGES) {
       console.warn(
         `[analyze_channel] Gemini failed ${consecutiveOutages} videos in a row, skipping the remaining videos: ${lastRequestError}`,
       );
+      stoppedEarly = true;
       break;
     }
 
@@ -744,6 +766,7 @@ ${truncated}`;
           // doomed call up to max_videos times.
           lastRequestError = failure;
           console.warn(`[analyze_channel] Gemini authentication failed (${resp.status}), aborting remaining videos: ${lastRequestError}`);
+          stoppedEarly = true;
           break;
         }
         throw new Error(failure);
@@ -807,6 +830,7 @@ ${truncated}`;
   // Every attempted video failed, whether at the HTTP level or via unparseable
   // JSON — surface it as a total failure so analyzeChannel's note reports a
   // Gemini outage instead of silently claiming success with zero structured topics.
+  fillReport();
   if (attempted > 0 && results.length === 0 && lastRequestError) {
     throw new Error(lastRequestError);
   }
@@ -907,6 +931,7 @@ export async function analyzeChannel(
   let geminiConfigured = false;
   let geminiKey: string | undefined;
   let geminiFailure = "";
+  const geminiReport: GeminiRunReport = { skipped: 0, stoppedEarly: false };
   // With no transcript text at all there is nothing for Gemini to read, and no key would change
   // that, so skip the call (and the key lookup) rather than report "0 semantic topics via Gemini"
   // or tell the user to set GEMINI_API_KEY for a result it could not improve.
@@ -915,7 +940,7 @@ export async function analyzeChannel(
     try {
       geminiKey = getGeminiApiKey();
       geminiConfigured = true;
-      topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey);
+      topics_structured = await extractTopicsWithLLM(transcriptItems, geminiKey, geminiReport);
       geminiUsed = true;
     } catch (err) {
       // Graceful degradation — topics_structured stays empty; topics is the fallback
@@ -925,10 +950,21 @@ export async function analyzeChannel(
     }
   }
 
+  // A run that got Gemini results for some videos but not others is still a "success" to the code above,
+  // yet the caller's model would read topics_structured as covering every transcript. Say how many are
+  // missing and why.
+  const incompleteNote =
+    geminiUsed && geminiReport.skipped > 0
+      ? ` Gemini gave no result for ${geminiReport.skipped} of the ${geminiReport.skipped + topics_structured.length} transcript(s), so topics_structured is incomplete` +
+        (geminiReport.lastError
+          ? ` (last cause: ${geminiReport.lastError}${geminiReport.stoppedEarly ? "; Gemini was not asked about the remaining videos after repeated failures" : ""}).`
+          : ".")
+      : "";
+
   const note = nothingToAnalyze
     ? `Analyzed ${videoIds.length} video(s), but none returned a transcript (captions disabled or unavailable, or the transcript scraper could not read them), so topics and topics_structured are empty.`
     : geminiUsed
-    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics_structured.length} semantic topics (topics_structured) via Gemini, ${topics.length} keyword topics as supplemental.`
+    ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics_structured.length} semantic topics (topics_structured) via Gemini, ${topics.length} keyword topics as supplemental.${incompleteNote}`
     : geminiConfigured
     ? `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (Gemini extraction failed — ${geminiFailure}).`
     : `Analyzed ${videoIds.length} video(s), ${transcriptsAvailable} with transcripts — ${topics.length} keyword topics only (GEMINI_API_KEY not configured). Set GEMINI_API_KEY for richer structured analysis.`;
